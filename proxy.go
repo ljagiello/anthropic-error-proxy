@@ -17,7 +17,6 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
