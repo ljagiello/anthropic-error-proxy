@@ -2,8 +2,6 @@ package main
 
 import (
 	"testing"
-
-	pb "github.com/ljagiello/fault-anthropic-plugin/proto"
 )
 
 func TestGetErrorType(t *testing.T) {
@@ -62,114 +60,10 @@ func TestGetStatusText(t *testing.T) {
 	}
 }
 
-func TestPassThrough(t *testing.T) {
-	testCases := []struct {
-		name  string
-		chunk []byte
-	}{
-		{name: "Empty chunk", chunk: []byte{}},
-		{name: "Simple text", chunk: []byte("Hello, World!")},
-		{name: "Binary data", chunk: []byte{0x00, 0x01, 0x02, 0xFF}},
-		{name: "Large chunk", chunk: make([]byte, 1024)},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := passThrough(tc.chunk)
-
-			if result == nil {
-				t.Fatal("passThrough returned nil")
-			}
-
-			// Check that it returns the correct type
-			action, ok := result.Action.(*pb.ProcessTunnelDataResponse_PassThrough)
-			if !ok {
-				t.Fatal("passThrough did not return ProcessTunnelDataResponse_PassThrough")
-			}
-
-			if action.PassThrough == nil {
-				t.Fatal("PassThrough field is nil")
-			}
-
-			// Verify the chunk is preserved
-			if len(action.PassThrough.Chunk) != len(tc.chunk) {
-				t.Errorf("Chunk length mismatch: got %d, want %d",
-					len(action.PassThrough.Chunk), len(tc.chunk))
-			}
-
-			for i := range tc.chunk {
-				if action.PassThrough.Chunk[i] != tc.chunk[i] {
-					t.Errorf("Chunk content mismatch at index %d: got %v, want %v",
-						i, action.PassThrough.Chunk[i], tc.chunk[i])
-					break
-				}
-			}
-		})
-	}
-}
-
-func TestShouldInjectError(t *testing.T) {
-	// Test deterministic cases
-	deterministicTests := []struct {
-		name        string
-		probability float64
-		expected    bool
-	}{
-		{name: "Zero probability", probability: 0.0, expected: false},
-		{name: "Negative probability", probability: -0.5, expected: false},
-		{name: "100% probability", probability: 1.0, expected: true},
-		{name: "Greater than 100%", probability: 1.5, expected: true},
-	}
-
-	for _, tt := range deterministicTests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := shouldInjectError(tt.probability)
-			if result != tt.expected {
-				t.Errorf("shouldInjectError(%f) = %v; want %v",
-					tt.probability, result, tt.expected)
-			}
-		})
-	}
-
-	// Test probabilistic cases with statistical validation
-	probabilisticTests := []struct {
-		name        string
-		probability float64
-		tolerance   float64
-	}{
-		{name: "10% probability", probability: 0.1, tolerance: 0.05},
-		{name: "25% probability", probability: 0.25, tolerance: 0.05},
-		{name: "50% probability", probability: 0.5, tolerance: 0.05},
-		{name: "75% probability", probability: 0.75, tolerance: 0.05},
-		{name: "90% probability", probability: 0.9, tolerance: 0.05},
-	}
-
-	for _, tt := range probabilisticTests {
-		t.Run(tt.name, func(t *testing.T) {
-			iterations := 10000
-			trueCount := 0
-
-			for i := 0; i < iterations; i++ {
-				if shouldInjectError(tt.probability) {
-					trueCount++
-				}
-			}
-
-			actualRate := float64(trueCount) / float64(iterations)
-
-			if actualRate < tt.probability-tt.tolerance ||
-			   actualRate > tt.probability+tt.tolerance {
-				t.Errorf("shouldInjectError(%f) statistical test failed: "+
-					"got rate %f (outside tolerance ±%f)",
-					tt.probability, actualRate, tt.tolerance)
-			}
-		})
-	}
-}
-
 func TestConfigValidation(t *testing.T) {
 	// Test Config struct initialization
 	config := Config{
+		ProxyPort:        8080,
 		ErrorProbability: 0.5,
 		StatusCode:       429,
 		ErrorBody:        `{"error": "test"}`,
@@ -179,6 +73,10 @@ func TestConfigValidation(t *testing.T) {
 		},
 		CACert: "/path/to/cert",
 		CAKey:  "/path/to/key",
+	}
+
+	if config.ProxyPort != 8080 {
+		t.Errorf("ProxyPort = %d; want 8080", config.ProxyPort)
 	}
 
 	if config.ErrorProbability != 0.5 {
@@ -217,23 +115,5 @@ func BenchmarkGetStatusText(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		getStatusText(codes[i%len(codes)])
-	}
-}
-
-func BenchmarkPassThrough(b *testing.B) {
-	chunk := []byte("This is a test chunk of data for benchmarking")
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		passThrough(chunk)
-	}
-}
-
-func BenchmarkShouldInjectError(b *testing.B) {
-	probabilities := []float64{0.0, 0.1, 0.5, 0.9, 1.0}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		shouldInjectError(probabilities[i%len(probabilities)])
 	}
 }

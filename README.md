@@ -246,7 +246,7 @@ This will:
 ```
 anthropic-error-proxy/
 ├── main.go                # Entry point and CLI handling
-├── standalone_proxy.go    # Proxy implementation
+├── proxy.go               # Proxy implementation
 ├── common.go             # Common utilities and types
 ├── common_test.go        # Tests for common utilities
 ├── go.mod                # Go module definition

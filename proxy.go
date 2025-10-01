@@ -24,8 +24,8 @@ import (
 	"time"
 )
 
-// StandaloneProxy is an HTTP/HTTPS proxy with TLS MITM capabilities
-type StandaloneProxy struct {
+// Proxy is an HTTP/HTTPS proxy with TLS MITM capabilities
+type Proxy struct {
 	listenAddr       string
 	targetHost       string
 	errorProbability float64
@@ -39,8 +39,8 @@ type StandaloneProxy struct {
 	certMutex sync.RWMutex
 }
 
-// NewStandaloneProxy creates a new proxy instance
-func NewStandaloneProxy(config Config) (*StandaloneProxy, error) {
+// NewProxy creates a new proxy instance
+func NewProxy(config Config) (*Proxy, error) {
 	// Load or generate CA
 	rootCA, rootKey, err := loadOrGenerateRootCA(config.CACert, config.CAKey)
 	if err != nil {
@@ -54,7 +54,7 @@ func NewStandaloneProxy(config Config) (*StandaloneProxy, error) {
 		Leaf:        rootCA,
 	}
 
-	return &StandaloneProxy{
+	return &Proxy{
 		listenAddr:       fmt.Sprintf(":%d", config.ProxyPort),
 		targetHost:       config.TargetHost,
 		errorProbability: config.ErrorProbability,
@@ -67,13 +67,13 @@ func NewStandaloneProxy(config Config) (*StandaloneProxy, error) {
 }
 
 // Start starts the proxy server
-func (p *StandaloneProxy) Start() error {
+func (p *Proxy) Start() error {
 	listener, err := net.Listen("tcp", p.listenAddr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", p.listenAddr, err)
 	}
 
-	log.Printf("🚀 Standalone proxy listening on %s", p.listenAddr)
+	log.Printf("🚀 Proxy listening on %s", p.listenAddr)
 	log.Printf("🎯 Target host: %s", p.targetHost)
 	log.Printf("🎲 Error probability: %.2f", p.errorProbability)
 	log.Printf("⚠️  Status code: %d", p.statusCode)
@@ -90,8 +90,10 @@ func (p *StandaloneProxy) Start() error {
 }
 
 // handleConnection handles an incoming connection
-func (p *StandaloneProxy) handleConnection(clientConn net.Conn) {
-	defer clientConn.Close()
+func (p *Proxy) handleConnection(clientConn net.Conn) {
+	defer func() {
+		_ = clientConn.Close()
+	}()
 
 	// Read the first line to determine if it's HTTP or CONNECT
 	reader := bufio.NewReader(clientConn)
@@ -109,7 +111,7 @@ func (p *StandaloneProxy) handleConnection(clientConn net.Conn) {
 }
 
 // handleConnect handles CONNECT requests for HTTPS
-func (p *StandaloneProxy) handleConnect(clientConn net.Conn, request *http.Request) {
+func (p *Proxy) handleConnect(clientConn net.Conn, request *http.Request) {
 	host := request.Host
 	if !strings.Contains(host, ":") {
 		host = host + ":443"
@@ -121,7 +123,10 @@ func (p *StandaloneProxy) handleConnect(clientConn net.Conn, request *http.Reque
 	log.Printf("[CONNECT] %s", host)
 
 	// Send 200 OK to establish tunnel
-	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		log.Printf("Failed to send CONNECT response: %v", err)
+		return
+	}
 
 	// Check if this is our target host for MITM
 	if hostname == p.targetHost {
@@ -133,7 +138,7 @@ func (p *StandaloneProxy) handleConnect(clientConn net.Conn, request *http.Reque
 }
 
 // handleHTTPSWithMITM performs TLS MITM for target hosts
-func (p *StandaloneProxy) handleHTTPSWithMITM(clientConn net.Conn, hostname string) {
+func (p *Proxy) handleHTTPSWithMITM(clientConn net.Conn, hostname string) {
 	// Get or generate certificate for this hostname
 	cert := p.getOrCreateCert(hostname)
 
@@ -145,7 +150,9 @@ func (p *StandaloneProxy) handleHTTPSWithMITM(clientConn net.Conn, hostname stri
 
 	// Wrap client connection with TLS
 	tlsClientConn := tls.Server(clientConn, tlsConfig)
-	defer tlsClientConn.Close()
+	defer func() {
+		_ = tlsClientConn.Close()
+	}()
 
 	// Perform handshake
 	if err := tlsClientConn.Handshake(); err != nil {
@@ -176,7 +183,7 @@ func (p *StandaloneProxy) handleHTTPSWithMITM(clientConn net.Conn, hostname stri
 }
 
 // sendErrorResponse sends an HTTP error response
-func (p *StandaloneProxy) sendErrorResponse(conn net.Conn) {
+func (p *Proxy) sendErrorResponse(conn net.Conn) {
 	body := p.errorBody
 	if body == "" {
 		errorData := map[string]interface{}{
@@ -209,11 +216,13 @@ func (p *StandaloneProxy) sendErrorResponse(conn net.Conn) {
 
 	response += "\r\n" + body
 
-	conn.Write([]byte(response))
+	if _, err := conn.Write([]byte(response)); err != nil {
+		log.Printf("Failed to write error response: %v", err)
+	}
 }
 
 // forwardToRealServer forwards the request to the real server
-func (p *StandaloneProxy) forwardToRealServer(clientConn net.Conn, request *http.Request, hostname string) {
+func (p *Proxy) forwardToRealServer(clientConn net.Conn, request *http.Request, hostname string) {
 	// Connect to the real server
 	serverConn, err := tls.Dial("tcp", hostname+":443", &tls.Config{
 		ServerName: hostname,
@@ -223,7 +232,9 @@ func (p *StandaloneProxy) forwardToRealServer(clientConn net.Conn, request *http
 		p.sendErrorResponse(clientConn)
 		return
 	}
-	defer serverConn.Close()
+	defer func() {
+		_ = serverConn.Close()
+	}()
 
 	// Set the Host header
 	request.Header.Set("Host", hostname)
@@ -243,28 +254,36 @@ func (p *StandaloneProxy) forwardToRealServer(clientConn net.Conn, request *http
 		log.Printf("Failed to read response: %v", err)
 		return
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	// Forward response to client
-	response.Write(clientConn)
+	if err := response.Write(clientConn); err != nil {
+		log.Printf("Failed to forward response to client: %v", err)
+	}
 }
 
 // handleHTTPSPassthrough passes through HTTPS for non-target hosts
-func (p *StandaloneProxy) handleHTTPSPassthrough(clientConn net.Conn, host string) {
+func (p *Proxy) handleHTTPSPassthrough(clientConn net.Conn, host string) {
 	serverConn, err := net.Dial("tcp", host)
 	if err != nil {
 		log.Printf("Failed to connect to %s: %v", host, err)
 		return
 	}
-	defer serverConn.Close()
+	defer func() {
+		_ = serverConn.Close()
+	}()
 
 	// Bidirectional copy
-	go io.Copy(serverConn, clientConn)
-	io.Copy(clientConn, serverConn)
+	go func() {
+		_, _ = io.Copy(serverConn, clientConn)
+	}()
+	_, _ = io.Copy(clientConn, serverConn)
 }
 
 // handleHTTP handles plain HTTP requests
-func (p *StandaloneProxy) handleHTTP(clientConn net.Conn, request *http.Request) {
+func (p *Proxy) handleHTTP(clientConn net.Conn, request *http.Request) {
 	log.Printf("[HTTP] %s %s", request.Method, request.URL)
 
 	// Parse the URL
@@ -304,14 +323,18 @@ func (p *StandaloneProxy) handleHTTP(clientConn net.Conn, request *http.Request)
 		log.Printf("Failed to forward request: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	// Write response back
-	resp.Write(clientConn)
+	if err := resp.Write(clientConn); err != nil {
+		log.Printf("Failed to write response to client: %v", err)
+	}
 }
 
 // getOrCreateCert gets or creates a certificate for a hostname
-func (p *StandaloneProxy) getOrCreateCert(hostname string) *tls.Certificate {
+func (p *Proxy) getOrCreateCert(hostname string) *tls.Certificate {
 	p.certMutex.RLock()
 	if cert, exists := p.certCache[hostname]; exists {
 		p.certMutex.RUnlock()
@@ -378,8 +401,8 @@ func generateCertForHost(hostname string, caCert *tls.Certificate) (*tls.Certifi
 	return cert, nil
 }
 
-// RunStandaloneProxy runs the standalone proxy server
-func RunStandaloneProxy() {
+// RunProxy runs the proxy server
+func RunProxy() {
 	var config Config
 
 	// Add proxy-specific flags
@@ -411,7 +434,7 @@ func RunStandaloneProxy() {
 
 	// Print banner
 	fmt.Println("========================================")
-	fmt.Println("Anthropic Error Proxy - Standalone Mode")
+	fmt.Println("Anthropic Error Proxy")
 	fmt.Println("========================================")
 	fmt.Printf("Proxy port: %d\n", config.ProxyPort)
 	fmt.Printf("Target host: %s\n", config.TargetHost)
@@ -420,7 +443,7 @@ func RunStandaloneProxy() {
 	fmt.Println("========================================")
 
 	// Create and start proxy
-	proxy, err := NewStandaloneProxy(config)
+	proxy, err := NewProxy(config)
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
 	}
@@ -428,6 +451,33 @@ func RunStandaloneProxy() {
 	if err := proxy.Start(); err != nil {
 		log.Fatalf("Failed to start proxy: %v", err)
 	}
+}
+
+// loadExistingCA attempts to load an existing CA certificate and key from disk
+func loadExistingCA(certPath, keyPath string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	// Use tls.LoadX509KeyPair to load the certificate and key
+	tlsCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load certificate and key: %w", err)
+	}
+
+	// Parse the certificate to get x509.Certificate
+	if len(tlsCert.Certificate) == 0 {
+		return nil, nil, fmt.Errorf("no certificates found in file")
+	}
+
+	cert, err := x509.ParseCertificate(tlsCert.Certificate[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	// Extract the RSA private key
+	privKey, ok := tlsCert.PrivateKey.(*rsa.PrivateKey)
+	if !ok {
+		return nil, nil, fmt.Errorf("private key is not an RSA key")
+	}
+
+	return cert, privKey, nil
 }
 
 // loadOrGenerateRootCA loads an existing CA or generates a new one
@@ -441,25 +491,9 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 	}
 
 	// Try to load existing CA
-	if certData, err := os.ReadFile(certPath); err == nil {
-		if keyData, err := os.ReadFile(keyPath); err == nil {
-			// Parse certificate
-			certBlock, _ := pem.Decode(certData)
-			if certBlock != nil {
-				cert, err := x509.ParseCertificate(certBlock.Bytes)
-				if err == nil {
-					// Parse private key
-					keyBlock, _ := pem.Decode(keyData)
-					if keyBlock != nil {
-						key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
-						if err == nil {
-							log.Printf("Loaded existing CA from %s", certPath)
-							return cert, key, nil
-						}
-					}
-				}
-			}
-		}
+	if cert, key, err := loadExistingCA(certPath, keyPath); err == nil {
+		log.Printf("Loaded existing CA from %s", certPath)
+		return cert, key, nil
 	}
 
 	// Generate new CA
@@ -506,7 +540,9 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 	if err != nil {
 		return nil, nil, err
 	}
-	defer certOut.Close()
+	defer func() {
+		_ = certOut.Close()
+	}()
 
 	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
 		return nil, nil, err
@@ -517,7 +553,9 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 	if err != nil {
 		return nil, nil, err
 	}
-	defer keyOut.Close()
+	defer func() {
+		_ = keyOut.Close()
+	}()
 
 	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}); err != nil {
 		return nil, nil, err

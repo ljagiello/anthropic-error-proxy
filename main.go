@@ -67,20 +67,26 @@ func main() {
 	}
 
 	// Print banner
-	fmt.Println("========================================")
-	fmt.Println("Anthropic Error Proxy")
-	fmt.Println("========================================")
-	fmt.Printf("Proxy port: %d\n", config.ProxyPort)
-	fmt.Printf("Target host: %s\n", config.TargetHost)
-	fmt.Printf("Error probability: %.2f\n", config.ErrorProbability)
-	fmt.Printf("Status code: %d\n", config.StatusCode)
+	// Define the banner using a raw string literal
+	banner := `========================================
+Anthropic Error Proxy
+========================================
+Proxy port:        %d
+Target host:       %s
+Error probability: %.2f
+Status code:       %d
+========================================
+`
+	// Print the banner with one call
+	fmt.Printf(banner, config.ProxyPort, config.TargetHost, config.ErrorProbability, config.StatusCode)
+
+	// Print custom error body if provided
 	if config.ErrorBody != "" {
-		fmt.Printf("Custom error body: %s\n", config.ErrorBody)
+		fmt.Printf("Custom error body: %s\n========================================\n", config.ErrorBody)
 	}
-	fmt.Println("========================================")
 
 	// Create and start proxy
-	proxy, err := NewStandaloneProxy(config)
+	proxy, err := NewProxy(config)
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
 	}
@@ -124,7 +130,7 @@ func handleCAOperations(exportCA string, installCA bool, caCertPath string) {
 		fmt.Println("Linux Installation:")
 		fmt.Println("------------------")
 		fmt.Printf("sudo cp %s /usr/local/share/ca-certificates/\n", certFile)
-		fmt.Println("sudo update-ca-certificates\n")
+		fmt.Println("sudo update-ca-certificates")
 
 		fmt.Println("Windows Installation:")
 		fmt.Println("--------------------")
