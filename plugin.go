@@ -382,24 +382,15 @@ func (p *Plugin) handleTLSInterception(session *Session, chunk []byte) *pb.Proce
 		return passThrough(chunk)
 	}
 
-	// Create TLS config for server side
-	// tlsConfig := &tls.Config{
-	// 	Certificates: []tls.Certificate{*cert},
-	// }
-	_ = cert // Certificate is ready for use
+	_ = cert // Certificate is ready for future TLS implementation
 
-	// Establish TLS with client (we act as server)
-	// Note: This is simplified - in reality we'd need bidirectional communication
-	// which the plugin architecture doesn't fully support
-	log.Printf("[Session %s] Would establish TLS MITM for %s (not fully implemented)", session.ID, session.TargetHost)
-
-	// For now, pass through
+	// TLS MITM is not fully implemented due to plugin architecture limitations
+	log.Printf("[Session %s] TLS certificate ready for %s (MITM not implemented)", session.ID, session.TargetHost)
 	return passThrough(chunk)
 }
 
 // handleDecryptedTraffic handles traffic after TLS is established
 func (p *Plugin) handleDecryptedTraffic(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
-	// This would handle decrypted traffic if TLS MITM was fully implemented
 	return passThrough(chunk)
 }
 
