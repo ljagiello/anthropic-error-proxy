@@ -99,7 +99,18 @@ func (p *Proxy) handleConnection(clientConn net.Conn) {
 	reader := bufio.NewReader(clientConn)
 	request, err := http.ReadRequest(reader)
 	if err != nil {
-		log.Printf("Failed to read request: %v", err)
+		// Check if it's EOF or a real error
+		if err == io.EOF {
+			// Connection closed without sending data
+			return
+		}
+		// Log only non-EOF errors to reduce noise
+		if !strings.Contains(err.Error(), "malformed HTTP request \" \"") {
+			log.Printf("Failed to read HTTP request: %v", err)
+		}
+		// Send 400 Bad Request for malformed requests
+		response := "HTTP/1.1 400 Bad Request\r\nContent-Length: 15\r\n\r\nBad Request\r\n"
+		_, _ = clientConn.Write([]byte(response))
 		return
 	}
 
@@ -285,6 +296,24 @@ func (p *Proxy) handleHTTPSPassthrough(clientConn net.Conn, host string) {
 // handleHTTP handles plain HTTP requests
 func (p *Proxy) handleHTTP(clientConn net.Conn, request *http.Request) {
 	log.Printf("[HTTP] %s %s", request.Method, request.URL)
+
+	// Handle health check endpoint
+	if request.URL.Path == "/health" {
+		response := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nOK"
+		if _, err := clientConn.Write([]byte(response)); err != nil {
+			log.Printf("Failed to write health response: %v", err)
+		}
+		return
+	}
+
+	// Prevent proxy loops - reject requests to localhost/127.0.0.1 on our proxy port
+	if strings.HasPrefix(request.Host, "localhost:") || strings.HasPrefix(request.Host, "127.0.0.1:") {
+		response := "HTTP/1.1 400 Bad Request\r\nContent-Length: 23\r\n\r\nProxy loop not allowed"
+		if _, err := clientConn.Write([]byte(response)); err != nil {
+			log.Printf("Failed to write error response: %v", err)
+		}
+		return
+	}
 
 	// Parse the URL
 	targetURL, err := url.Parse(request.URL.String())
