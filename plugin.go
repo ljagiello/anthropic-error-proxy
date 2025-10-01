@@ -113,6 +113,48 @@ func (p *Plugin) cleanupSessions() {
 	}
 }
 
+// loadExistingCA attempts to load a CA certificate and key from files
+func loadExistingCA(certFile, keyFile string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	// Read certificate file
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read certificate file: %w", err)
+	}
+
+	// Read key file
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read key file: %w", err)
+	}
+
+	// Decode certificate PEM
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		return nil, nil, fmt.Errorf("failed to decode certificate PEM")
+	}
+
+	// Parse certificate
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	// Decode key PEM
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, nil, fmt.Errorf("failed to decode key PEM")
+	}
+
+	// Parse private key
+	key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	log.Printf("Loaded existing CA from %s", certFile)
+	return cert, key, nil
+}
+
 // loadOrGenerateRootCA loads or creates a CA certificate
 func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.PrivateKey, error) {
 	var certFile, keyFile string
@@ -130,29 +172,15 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 		return nil, nil, fmt.Errorf("both CA certificate and key paths must be provided, or neither")
 	}
 
-	// Try to load existing
-	if certPEM, err := os.ReadFile(certFile); err == nil {
-		if keyPEM, err := os.ReadFile(keyFile); err == nil {
-			block, _ := pem.Decode(certPEM)
-			if block != nil {
-				cert, err := x509.ParseCertificate(block.Bytes)
-				if err == nil {
-					keyBlock, _ := pem.Decode(keyPEM)
-					if keyBlock != nil {
-						key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
-						if err == nil {
-							log.Printf("Loaded existing CA from %s", certFile)
-							return cert, key, nil
-						}
-					}
-				}
-			}
-		}
+	// Try to load existing CA
+	cert, key, err := loadExistingCA(certFile, keyFile)
+	if err == nil {
+		return cert, key, nil
 	}
 
 	// Generate new
 	log.Println("Generating new CA for TLS interception...")
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	newKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -178,12 +206,12 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 		MaxPathLenZero:        true,
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &newKey.PublicKey, newKey)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	cert, err := x509.ParseCertificate(certDER)
+	newCert, err := x509.ParseCertificate(certDER)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -205,7 +233,7 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create key file: %w", err)
 	}
-	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
+	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(newKey)}); err != nil {
 		_ = keyOut.Close()
 		return nil, nil, fmt.Errorf("failed to encode private key: %w", err)
 	}
@@ -214,7 +242,7 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 	}
 
 	log.Printf("Generated CA certificate: %s", certFile)
-	return cert, key, nil
+	return newCert, newKey, nil
 }
 
 // getOrCreateCertificate gets or creates a certificate for a host
