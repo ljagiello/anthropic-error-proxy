@@ -1,16 +1,17 @@
 # Anthropic Error Injection Plugin
 
-A gRPC-based plugin for the Fault proxy that intercepts HTTPS traffic to `api.anthropic.com` and injects configurable HTTP errors with specified probability.
+A flexible HTTP/HTTPS proxy that intercepts traffic to `api.anthropic.com` and injects configurable HTTP errors with specified probability. Can run as either a Fault proxy plugin or a standalone HTTP/HTTPS proxy.
 
 ## Features
 
-- **Full TLS MITM**: Implements complete TLS server to intercept and decrypt HTTPS traffic
-- **HTTP Error Injection**: Returns actual HTTP 429 (or other status codes) responses over HTTPS
+- **Standalone HTTP/HTTPS Proxy Mode**: Full-featured proxy with TLS MITM capabilities
+- **Fault Plugin Mode**: gRPC-based plugin for the Fault proxy (experimental)
+- **Full TLS MITM**: Intercepts and decrypts HTTPS traffic using generated certificates
+- **HTTP Error Injection**: Returns actual HTTP error responses (429, 500, 503, etc.) over HTTPS
 - **Probabilistic error injection**: Configure the likelihood of errors (0.0 to 1.0)
 - **Anthropic API specific**: Targets `api.anthropic.com` by default (configurable)
 - **Automatic certificate generation**: Creates CA and domain certificates for TLS interception
-- **Session state tracking**: Maintains TLS state across multiple data chunks
-- **gRPC plugin architecture**: Implements the Fault proxy plugin protocol
+- **Pass-through mode**: Non-target traffic passes through unmodified
 
 ## How It Works
 
@@ -84,28 +85,65 @@ make build
 
 ## Running
 
-### Command Line Options
+### Standalone Proxy Mode (Recommended)
+
+Run as a standalone HTTP/HTTPS proxy server:
 
 ```bash
 ./anthropic-error-plugin \
-  --port 50051 \
+  --standalone \
+  --proxy-port 8080 \
   --error-probability 0.3 \
   --status-code 429 \
   --target-host api.anthropic.com
 ```
 
+Then configure your HTTP client to use `http://localhost:8080` as the proxy:
+
+```bash
+# Using curl with the proxy
+curl -k -x http://localhost:8080 \
+  https://api.anthropic.com/v1/messages \
+  -H "x-api-key: YOUR_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Fault Plugin Mode
+
+Run as a gRPC plugin for the Fault proxy:
+
+```bash
+# Start the plugin
+./anthropic-error-plugin \
+  --port 50051 \
+  --error-probability 0.3 \
+  --status-code 429 \
+  --target-host api.anthropic.com
+
+# Start Fault proxy with the plugin
+fault run --grpc-plugin http://localhost:50051 --upstream https://api.anthropic.com
+```
+
 ### Available Flags
 
-- `--port`: gRPC server port (default: 50051)
-- `--config`: JSON configuration file path
+**Common flags:**
 - `--error-probability`: Probability of error injection 0-1 (default: 0.1)
 - `--status-code`: HTTP status code to return (default: 500)
 - `--error-body`: Custom error response body JSON
 - `--target-host`: Target host to intercept (default: api.anthropic.com)
+- `--config`: JSON configuration file path
 - `--ca-cert`: Path to existing CA certificate file (must be used with --ca-key)
 - `--ca-key`: Path to existing CA private key file (must be used with --ca-cert)
 - `--export-ca`: Export CA certificate to specified file
 - `--install-ca`: Show CA certificate installation instructions
+
+**Standalone mode:**
+- `--standalone`: Run as standalone HTTP/HTTPS proxy
+- `--proxy-port`: Proxy listening port (default: 8080)
+
+**Plugin mode:**
+- `--port`: gRPC server port (default: 50051)
 
 ### Using Configuration File
 

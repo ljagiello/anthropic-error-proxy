@@ -16,6 +16,8 @@ import (
 func main() {
 	var (
 		port             = flag.Int("port", 50051, "gRPC plugin port")
+		standalone       = flag.Bool("standalone", false, "Run as standalone HTTP/HTTPS proxy")
+		proxyPort        = flag.Int("proxy-port", 8080, "Proxy port in standalone mode")
 		configFile       = flag.String("config", "", "Config file path (JSON)")
 		errorProb        = flag.Float64("error-probability", 0.1, "Probability of injecting an error (0-1)")
 		statusCode       = flag.Int("status-code", 500, "HTTP status code to return")
@@ -43,6 +45,7 @@ func main() {
 		Headers:          make(map[string]string),
 		CACert:           *caCert,
 		CAKey:            *caKey,
+		ProxyPort:        *proxyPort,
 	}
 
 	// Load config from file if provided
@@ -67,6 +70,33 @@ func main() {
 		log.SetFlags(log.LstdFlags)
 	}
 
+	// Run in standalone mode if requested
+	if *standalone {
+		log.Printf("========================================")
+		log.Printf("Anthropic Error Proxy - Standalone Mode")
+		log.Printf("========================================")
+		log.Printf("Proxy port: %d", config.ProxyPort)
+		log.Printf("Target host: %s", config.TargetHost)
+		log.Printf("Error probability: %.2f", config.ErrorProbability)
+		log.Printf("Status code: %d", config.StatusCode)
+		if config.ErrorBody != "" {
+			log.Printf("Custom error body: %s", config.ErrorBody)
+		}
+		log.Printf("========================================")
+
+		// Create and run standalone proxy
+		proxy, err := NewStandaloneProxy(config)
+		if err != nil {
+			log.Fatalf("Failed to create standalone proxy: %v", err)
+		}
+
+		if err := proxy.Start(); err != nil {
+			log.Fatalf("Failed to start standalone proxy: %v", err)
+		}
+		return
+	}
+
+	// Plugin mode
 	log.Printf("========================================")
 	log.Printf("Anthropic Error Plugin v0.0.1")
 	log.Printf("========================================")

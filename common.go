@@ -9,6 +9,8 @@ import (
 
 // Config holds the plugin configuration
 type Config struct {
+	Port             int               `json:"port,omitempty"`
+	ProxyPort        int               `json:"proxy_port,omitempty"`
 	ErrorProbability float64           `json:"error_probability"`
 	StatusCode       int               `json:"status_code"`
 	ErrorBody        string            `json:"error_body"`
