@@ -1,0 +1,12 @@
+{
+  "error_probability": 0.3,
+  "status_code": 429,
+  "target_host": "api.anthropic.com",
+  "error_body": "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Rate limit exceeded. Please try again later.\"}}",
+  "headers": {
+    "X-RateLimit-Limit": "1000",
+    "X-RateLimit-Remaining": "0",
+    "X-RateLimit-Reset": "1234567890",
+    "Retry-After": "60"
+  }
+}
