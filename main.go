@@ -85,8 +85,8 @@ func main() {
 	log.Printf("  ✅ Tunnel mode")
 	log.Printf("========================================")
 
-	// Create the smart plugin that handles both TLS and non-TLS
-	plugin, err := NewSmartPlugin(config)
+	// Create the plugin that handles both TLS and non-TLS
+	plugin, err := NewPlugin(config)
 	if err != nil {
 		log.Fatalf("Failed to create plugin: %v", err)
 	}

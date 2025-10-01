@@ -23,8 +23,8 @@ import (
 	pb "github.com/ljagiello/fault-anthropic-plugin/proto"
 )
 
-// SmartPlugin handles both TLS and non-TLS traffic transparently
-type SmartPlugin struct {
+// Plugin handles both TLS and non-TLS traffic transparently
+type Plugin struct {
 	pb.UnimplementedPluginServiceServer
 	config         Config
 	sessions       map[string]*Session
@@ -60,15 +60,15 @@ type Session struct {
 	mutex            sync.Mutex
 }
 
-// NewSmartPlugin creates a plugin that handles both TLS and non-TLS
-func NewSmartPlugin(config Config) (*SmartPlugin, error) {
+// NewPlugin creates a plugin that handles both TLS and non-TLS
+func NewPlugin(config Config) (*Plugin, error) {
 	// Load or generate CA for TLS interception
 	rootCA, rootKey, err := loadOrGenerateRootCA(config.CACert, config.CAKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup CA: %w", err)
 	}
 
-	p := &SmartPlugin{
+	p := &Plugin{
 		config:    config,
 		sessions:  make(map[string]*Session),
 		rootCA:    rootCA,
@@ -83,7 +83,7 @@ func NewSmartPlugin(config Config) (*SmartPlugin, error) {
 }
 
 // cleanupSessions removes old inactive sessions to prevent memory leaks
-func (p *SmartPlugin) cleanupSessions() {
+func (p *Plugin) cleanupSessions() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -218,7 +218,7 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 }
 
 // getOrCreateCertificate gets or creates a certificate for a host
-func (p *SmartPlugin) getOrCreateCertificate(host string) (*tls.Certificate, error) {
+func (p *Plugin) getOrCreateCertificate(host string) (*tls.Certificate, error) {
 	p.certMutex.RLock()
 	if cert, exists := p.certCache[host]; exists {
 		p.certMutex.RUnlock()
@@ -264,7 +264,7 @@ func (p *SmartPlugin) getOrCreateCertificate(host string) (*tls.Certificate, err
 }
 
 // ProcessTunnelData handles both encrypted and unencrypted tunnel data
-func (p *SmartPlugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDataRequest) (*pb.ProcessTunnelDataResponse, error) {
+func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDataRequest) (*pb.ProcessTunnelDataResponse, error) {
 	session := p.getOrCreateSession(req.Id)
 
 	session.mutex.Lock()
@@ -312,7 +312,7 @@ func (p *SmartPlugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunn
 }
 
 // handleConnect processes CONNECT requests
-func (p *SmartPlugin) handleConnect(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
+func (p *Plugin) handleConnect(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
 	lines := strings.Split(string(chunk), "\r\n")
 	if len(lines) > 0 {
 		parts := strings.Fields(lines[0])
@@ -343,7 +343,7 @@ func (p *SmartPlugin) handleConnect(session *Session, chunk []byte) *pb.ProcessT
 }
 
 // handleTLSInterception sets up TLS MITM
-func (p *SmartPlugin) handleTLSInterception(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
+func (p *Plugin) handleTLSInterception(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
 	// Buffer the client hello
 	session.ClientBuffer.Write(chunk)
 
@@ -370,13 +370,13 @@ func (p *SmartPlugin) handleTLSInterception(session *Session, chunk []byte) *pb.
 }
 
 // handleDecryptedTraffic handles traffic after TLS is established
-func (p *SmartPlugin) handleDecryptedTraffic(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
+func (p *Plugin) handleDecryptedTraffic(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
 	// This would handle decrypted traffic if TLS MITM was fully implemented
 	return passThrough(chunk)
 }
 
 // handleHTTPRequest handles plain HTTP requests
-func (p *SmartPlugin) handleHTTPRequest(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
+func (p *Plugin) handleHTTPRequest(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
 	// Parse the HTTP request
 	reader := bufio.NewReader(bytes.NewReader(chunk))
 	request, err := http.ReadRequest(reader)
@@ -422,7 +422,7 @@ func (p *SmartPlugin) handleHTTPRequest(session *Session, chunk []byte) *pb.Proc
 }
 
 // ProcessHttpRequest handles HTTP forward mode (non-tunnel)
-func (p *SmartPlugin) ProcessHttpRequest(ctx context.Context, req *pb.ProcessHttpRequestRequest) (*pb.ProcessHttpRequestResponse, error) {
+func (p *Plugin) ProcessHttpRequest(ctx context.Context, req *pb.ProcessHttpRequestRequest) (*pb.ProcessHttpRequestResponse, error) {
 	// Check host in headers
 	targetHost := ""
 	for _, header := range req.Request.Headers {
@@ -464,14 +464,14 @@ func (p *SmartPlugin) ProcessHttpRequest(ctx context.Context, req *pb.ProcessHtt
 }
 
 // ProcessHttpResponse - pass through responses
-func (p *SmartPlugin) ProcessHttpResponse(ctx context.Context, req *pb.ProcessHttpResponseRequest) (*pb.ProcessHttpResponseResponse, error) {
+func (p *Plugin) ProcessHttpResponse(ctx context.Context, req *pb.ProcessHttpResponseRequest) (*pb.ProcessHttpResponseResponse, error) {
 	return &pb.ProcessHttpResponseResponse{
 		Action: pb.ProcessHttpResponseResponse_CONTINUE,
 	}, nil
 }
 
 // getOrCreateSession gets or creates a session
-func (p *SmartPlugin) getOrCreateSession(id string) *Session {
+func (p *Plugin) getOrCreateSession(id string) *Session {
 	p.sessionMutex.RLock()
 	if session, exists := p.sessions[id]; exists {
 		p.sessionMutex.RUnlock()
@@ -499,7 +499,7 @@ func (p *SmartPlugin) getOrCreateSession(id string) *Session {
 }
 
 // createHTTPErrorResponse creates an HTTP error response
-func (p *SmartPlugin) createHTTPErrorResponse() []byte {
+func (p *Plugin) createHTTPErrorResponse() []byte {
 	body := p.config.ErrorBody
 	if body == "" {
 		errorData := map[string]interface{}{
@@ -554,15 +554,15 @@ func isHTTPRequest(data []byte) bool {
 }
 
 // HealthCheck implements the health check RPC
-func (p *SmartPlugin) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
+func (p *Plugin) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
 	return &pb.HealthCheckResponse{
 		Healthy: true,
-		Message: "Smart plugin is healthy - handles both TLS and non-TLS traffic",
+		Message: "Plugin is healthy - handles both TLS and non-TLS traffic",
 	}, nil
 }
 
 // GetPluginInfo returns plugin metadata
-func (p *SmartPlugin) GetPluginInfo(ctx context.Context, req *pb.GetPluginInfoRequest) (*pb.GetPluginInfoResponse, error) {
+func (p *Plugin) GetPluginInfo(ctx context.Context, req *pb.GetPluginInfoRequest) (*pb.GetPluginInfoResponse, error) {
 	return &pb.GetPluginInfoResponse{
 		Name:      "anthropic-error-plugin",
 		Version:   "0.0.1",
@@ -575,7 +575,7 @@ func (p *SmartPlugin) GetPluginInfo(ctx context.Context, req *pb.GetPluginInfoRe
 }
 
 // GetPluginCapabilities returns what the plugin can handle
-func (p *SmartPlugin) GetPluginCapabilities(ctx context.Context, req *pb.GetPluginCapabilitiesRequest) (*pb.GetPluginCapabilitiesResponse, error) {
+func (p *Plugin) GetPluginCapabilities(ctx context.Context, req *pb.GetPluginCapabilitiesRequest) (*pb.GetPluginCapabilitiesResponse, error) {
 	return &pb.GetPluginCapabilitiesResponse{
 		CanHandleHttpForward: true,  // Can handle HTTP forward mode
 		CanHandleTunnel:      true,  // Can handle tunnel mode
