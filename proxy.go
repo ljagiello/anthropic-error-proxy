@@ -304,44 +304,60 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, request *http.Request) {
 		return
 	}
 
+	// For localhost requests, try both IPv4 and IPv6
+	targetURL := request.URL.String()
+	if strings.HasPrefix(request.Host, "localhost:") {
+		// Replace localhost with 127.0.0.1 to force IPv4
+		targetURL = strings.Replace(targetURL, "localhost", "127.0.0.1", 1)
+	}
+
 	// Parse the URL
-	targetURL, err := url.Parse(request.URL.String())
+	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		log.Printf("Failed to parse URL: %v", err)
 		return
 	}
 
-	// Forward the request
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	// Forward the request using direct TCP connection for better streaming support
+	// This handles SSE and other streaming responses properly
+	hostPort := request.Host
+	if !strings.Contains(hostPort, ":") {
+		if parsedURL.Scheme == "https" {
+			hostPort += ":443"
+		} else {
+			hostPort += ":80"
+		}
 	}
 
-	// Create new request
-	proxyReq, err := http.NewRequest(request.Method, targetURL.String(), request.Body)
-	if err != nil {
-		log.Printf("Failed to create request: %v", err)
-		return
+	// For localhost, force IPv4
+	if strings.HasPrefix(hostPort, "localhost:") {
+		hostPort = strings.Replace(hostPort, "localhost", "127.0.0.1", 1)
 	}
 
-	// Copy headers
-	proxyReq.Header = request.Header
-
-	// Make the request
-	resp, err := client.Do(proxyReq)
+	// Connect to target
+	targetConn, err := net.Dial("tcp", hostPort)
 	if err != nil {
-		log.Printf("Failed to forward request: %v", err)
+		log.Printf("Failed to connect to %s: %v", hostPort, err)
+		// Send error response
+		response := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Length: %d\r\n\r\n%s", len(err.Error()), err.Error())
+		_, _ = clientConn.Write([]byte(response))
 		return
 	}
 	defer func() {
-		_ = resp.Body.Close()
+		_ = targetConn.Close()
 	}()
 
-	// Write response back
-	if err := resp.Write(clientConn); err != nil {
-		log.Printf("Failed to write response to client: %v", err)
+	// Write the request to target
+	if err := request.Write(targetConn); err != nil {
+		log.Printf("Failed to write request to target: %v", err)
+		return
 	}
+
+	// Bidirectional copy for streaming support
+	go func() {
+		_, _ = io.Copy(targetConn, clientConn)
+	}()
+	_, _ = io.Copy(clientConn, targetConn)
 }
 
 // getOrCreateCert gets or creates a certificate for a hostname
