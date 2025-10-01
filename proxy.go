@@ -297,21 +297,10 @@ func (p *Proxy) handleHTTPSPassthrough(clientConn net.Conn, host string) {
 func (p *Proxy) handleHTTP(clientConn net.Conn, request *http.Request) {
 	log.Printf("[HTTP] %s %s", request.Method, request.URL)
 
-	// Handle health check endpoint
-	if request.URL.Path == "/health" {
-		response := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nOK"
-		if _, err := clientConn.Write([]byte(response)); err != nil {
-			log.Printf("Failed to write health response: %v", err)
-		}
-		return
-	}
-
-	// Prevent proxy loops - reject requests to localhost/127.0.0.1 on our proxy port
-	if strings.HasPrefix(request.Host, "localhost:") || strings.HasPrefix(request.Host, "127.0.0.1:") {
-		response := "HTTP/1.1 400 Bad Request\r\nContent-Length: 23\r\n\r\nProxy loop not allowed"
-		if _, err := clientConn.Write([]byte(response)); err != nil {
-			log.Printf("Failed to write error response: %v", err)
-		}
+	// Check if this is our target host for error injection
+	if request.Host == p.targetHost && mrand.Float64() < p.errorProbability {
+		log.Printf("[HTTP] 💉 Injecting error")
+		p.sendErrorResponse(clientConn)
 		return
 	}
 
@@ -319,13 +308,6 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, request *http.Request) {
 	targetURL, err := url.Parse(request.URL.String())
 	if err != nil {
 		log.Printf("Failed to parse URL: %v", err)
-		return
-	}
-
-	// Check if this is our target host
-	if request.Host == p.targetHost && mrand.Float64() < p.errorProbability {
-		log.Printf("[HTTP] 💉 Injecting error")
-		p.sendErrorResponse(clientConn)
 		return
 	}
 
