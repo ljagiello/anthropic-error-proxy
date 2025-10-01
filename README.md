@@ -1,36 +1,29 @@
 # Anthropic Error Injection Plugin
 
-A gRPC-based plugin for the Fault proxy that can inject configurable HTTP errors with specified probability.
+A gRPC-based plugin for the Fault proxy that intercepts HTTPS traffic to `api.anthropic.com` and injects configurable HTTP errors with specified probability.
 
-⚠️ **IMPORTANT LIMITATION**: This plugin currently **cannot intercept HTTPS traffic**. TLS MITM is not implemented, meaning it cannot inject errors into encrypted HTTPS requests to `api.anthropic.com`.
+## Features
 
-## Current Capabilities
+- **TLS MITM Interception**: Intercepts and decrypts HTTPS traffic using dynamically generated certificates
+- **Probabilistic error injection**: Configure the likelihood of errors (0.0 to 1.0)
+- **Customizable error responses**: Set status codes, error messages, and headers
+- **Anthropic API specific**: Targets `api.anthropic.com` by default (configurable)
+- **Certificate generation**: Creates certificates on-the-fly signed by local CA
+- **Session state tracking**: Maintains state for each tunnel connection
+- **gRPC plugin architecture**: Implements the Fault proxy plugin protocol
 
-### What Works ✅
-- **Plain HTTP traffic**: Can inject errors into unencrypted HTTP requests
-- **HTTP forward mode**: Handles direct HTTP proxy forwarding
-- **CONNECT tunnel detection**: Identifies tunnel establishment for HTTPS
-- **Session tracking**: Maintains state for each connection
-- **Probabilistic error injection**: For plain HTTP traffic only
+## How It Works
 
-### What Doesn't Work ❌
-- **HTTPS interception**: Cannot decrypt or modify HTTPS traffic
-- **TLS MITM**: Not implemented despite CA certificate generation code
-- **Anthropic API error injection**: Since the API uses HTTPS exclusively
-- **Encrypted tunnel traffic**: Can detect but cannot modify
-
-## How It Currently Works
-
-The plugin can only handle:
-
-1. Plain HTTP requests (non-encrypted)
-2. HTTP requests in CONNECT tunnels before TLS handshake begins
-3. Direct HTTP forwarding through the proxy
-
-When HTTPS traffic is detected, the plugin:
-- Logs that TLS was detected
-- Passes through all encrypted data unchanged
-- Cannot inject any errors
+1. **CONNECT Detection**: Intercepts CONNECT tunnel requests to identify target hosts
+2. **TLS Interception**: When TLS handshake is detected for target hosts:
+   - Generates a certificate for the target domain signed by our CA
+   - Responds with ServerHello using the generated certificate
+   - Establishes TLS session with the client
+3. **Traffic Modification**: Decrypts HTTPS traffic and can:
+   - Inject HTTP error responses based on probability
+   - Modify requests or responses
+   - Pass through unmodified traffic
+4. **Session Management**: Tracks each connection's state through the TLS handshake
 
 ## Building
 
@@ -104,19 +97,55 @@ Example `config.json`:
 Note: `ca_cert` and `ca_key` fields are optional but must be provided together if used.
 
 
-## CA Certificate (Currently Unused)
+## CA Certificate Management
 
-⚠️ **Note**: The plugin generates CA certificates but **does not use them** since TLS MITM is not implemented. The CA-related flags exist but have no practical effect on the plugin's operation.
+### Important: Install the CA Certificate
 
-### CA-Related Flags (Non-functional)
+For TLS MITM to work properly, you **MUST** install the generated CA certificate in your system's trust store. Without this, clients will reject the dynamically generated certificates.
 
-The following flags exist in the code but don't enable HTTPS interception:
-- `--ca-cert`: Path to CA certificate file
-- `--ca-key`: Path to CA private key file
-- `--export-ca`: Export CA certificate
+### Generating and Installing the CA
+
+1. **Export the CA certificate**:
+```bash
+./anthropic-error-plugin --export-ca fault-proxy-ca.crt
+```
+
+2. **Install the CA certificate** (choose based on your OS):
+
+#### macOS
+```bash
+# System-wide trust
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain fault-proxy-ca.crt
+
+# Or user-only trust
+security add-trusted-cert -d -r trustRoot -k ~/Library/Keychains/login.keychain fault-proxy-ca.crt
+```
+
+#### Linux
+```bash
+# Ubuntu/Debian
+sudo cp fault-proxy-ca.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+
+# RHEL/CentOS/Fedora
+sudo cp fault-proxy-ca.crt /etc/pki/ca-trust/source/anchors/
+sudo update-ca-trust
+```
+
+#### Windows
+```powershell
+# Run as Administrator
+certutil -addstore -f "ROOT" fault-proxy-ca.crt
+```
+
+### CA Configuration Options
+
+- `--ca-cert`: Path to existing CA certificate file
+- `--ca-key`: Path to existing CA private key file
+- `--export-ca`: Export CA certificate to specified file
 - `--install-ca`: Show CA installation instructions
 
-These flags were intended for future TLS MITM implementation but currently serve no purpose since the plugin cannot decrypt HTTPS traffic.
+Note: Both `--ca-cert` and `--ca-key` must be provided together if using existing CA files.
 
 ## Error Response Examples
 
@@ -166,21 +195,24 @@ These flags were intended for future TLS MITM implementation but currently serve
 
 ## Integration with Fault Proxy
 
-⚠️ **LIMITATION**: This plugin cannot inject errors into HTTPS traffic to api.anthropic.com since it cannot decrypt TLS.
-
-The plugin can only handle:
-- Plain HTTP traffic (rare in production)
-- HTTP requests before TLS handshake in tunnels
-- Direct HTTP proxy forwarding
+The plugin works with the Fault proxy to intercept and modify HTTPS traffic:
 
 ```bash
-# Example Fault proxy configuration (adjust based on actual Fault CLI)
-# Note: Will NOT work for HTTPS traffic to api.anthropic.com
+# Start the plugin
+./anthropic-error-plugin \
+  --port 50051 \
+  --error-probability 0.3 \
+  --status-code 429 \
+  --target-host api.anthropic.com
+
+# Configure Fault proxy to use the plugin
 fault run \
   --mode tunnel \
   --plugin-endpoint localhost:50051 \
   --target https://api.anthropic.com
 ```
+
+**Important**: Ensure the CA certificate is installed in your system trust store before testing.
 
 ## Plugin Protocol
 

@@ -55,14 +55,17 @@ type Session struct {
 	ClientReader     *bufio.Reader
 	ServerReader     *bufio.Reader
 
+	// TLS handler for this session
+	tlsHandler       *TLSHandler
+
 	// State tracking
 	LastErrorCheck   time.Time
 	mutex            sync.Mutex
 }
 
-// NewPlugin creates a plugin that handles HTTP traffic
+// NewPlugin creates a plugin that handles HTTP and HTTPS traffic
 func NewPlugin(config Config) (*Plugin, error) {
-	// Load or generate CA (currently unused - TLS MITM not implemented)
+	// Load or generate CA for TLS MITM
 	rootCA, rootKey, err := loadOrGenerateRootCA(config.CACert, config.CAKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup CA: %w", err)
@@ -272,7 +275,11 @@ func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDat
 
 			// Attempt TLS MITM if this is our target host
 			if session.TargetHost == p.config.TargetHost {
-				return p.handleTLSInterception(session, req.Chunk), nil
+				// Create TLS handler if not exists
+				if session.tlsHandler == nil {
+					session.tlsHandler = NewTLSHandler(session, p)
+				}
+				return session.tlsHandler.ProcessData(req.Chunk), nil
 			}
 
 			// Pass through for non-target hosts
@@ -280,9 +287,9 @@ func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDat
 		}
 	}
 
-	// If TLS is established, decrypt and handle
-	if session.TLSEstablished {
-		return p.handleDecryptedTraffic(session, req.Chunk), nil
+	// If TLS is established, use the TLS handler
+	if session.TLSEstablished && session.tlsHandler != nil {
+		return session.tlsHandler.ProcessData(req.Chunk), nil
 	}
 
 	// Check for plain HTTP request
@@ -325,19 +332,6 @@ func (p *Plugin) handleConnect(session *Session, chunk []byte) *pb.ProcessTunnel
 	return passThrough(chunk)
 }
 
-// handleTLSInterception handles TLS traffic (passes through without decryption)
-func (p *Plugin) handleTLSInterception(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
-	// TLS MITM is not implemented - this plugin cannot decrypt HTTPS traffic
-	// It can only pass through the encrypted data unchanged
-	// The CA certificate generation code exists but is not used for actual interception
-	log.Printf("[Session %s] TLS traffic detected for %s (passing through - cannot decrypt)", session.ID, session.TargetHost)
-	return passThrough(chunk)
-}
-
-// handleDecryptedTraffic would handle decrypted traffic if TLS MITM was implemented
-func (p *Plugin) handleDecryptedTraffic(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
-	return passThrough(chunk)
-}
 
 // handleHTTPRequest handles plain HTTP requests
 func (p *Plugin) handleHTTPRequest(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
