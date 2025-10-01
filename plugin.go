@@ -55,6 +55,7 @@ type Session struct {
 	TLSServer        *tls.Conn
 	ClientReader     *bufio.Reader
 	ServerReader     *bufio.Reader
+	TLSHandler       *TLSHandler
 
 	// State tracking
 	LastErrorCheck   time.Time
@@ -262,31 +263,50 @@ func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDat
 	}
 
 	// Check for CONNECT request (HTTPS tunneling setup)
+	// Note: Fault proxy doesn't pass CONNECT requests to plugins, so we detect TLS directly
 	if !session.ConnectSeen && bytes.HasPrefix(req.Chunk, []byte("CONNECT ")) {
 		return p.handleConnect(session, req.Chunk), nil
 	}
 
-	// After CONNECT, check if it's TLS
-	if session.ConnectSeen && !session.HandshakeStarted {
-		if isTLSHandshake(req.Chunk) {
-			session.IsTLS = true
-			session.HandshakeStarted = true
-			log.Printf("[Session %s] TLS handshake detected for %s", session.ID, session.TargetHost)
+	// Check if it's TLS handshake (ClientHello) - happens after CONNECT
+	if !session.HandshakeStarted && isTLSHandshake(req.Chunk) {
+		// Mark that we've seen a CONNECT implicitly (since we're seeing TLS)
+		if !session.ConnectSeen {
+			session.ConnectSeen = true
+			session.IsHTTPS = true
+			// Try to extract the target from the request if possible
+			// For now, assume it's our target if we're configured for it
+			session.TargetHost = p.config.TargetHost
+			log.Printf("[Session %s] TLS detected, assuming target: %s", session.ID, session.TargetHost)
+		}
 
-			// For target host, we need to do TLS MITM
-			if session.TargetHost == p.config.TargetHost {
-				log.Printf("[Session %s] Target host matched - attempting TLS MITM", session.ID)
-				// For now, pass through while we fix TLS MITM
-				// TODO: Implement proper TLS termination
-				return passThrough(req.Chunk), nil
+		session.IsTLS = true
+		session.HandshakeStarted = true
+		log.Printf("[Session %s] TLS handshake detected for %s", session.ID, session.TargetHost)
+
+		// For target host, we need to do TLS handling
+		if session.TargetHost == p.config.TargetHost {
+			log.Printf("[Session %s] Target host matched - initializing TLS handler", session.ID)
+
+			// Initialize TLS handler for this session
+			if session.TLSHandler == nil {
+				session.TLSHandler = NewTLSHandler(session, p)
 			}
 
-			// Pass through for non-target hosts
-			return passThrough(req.Chunk), nil
+			// Process the ClientHello through TLS handler
+			return session.TLSHandler.ProcessData(req.Chunk), nil
 		}
+
+		// Pass through for non-target hosts
+		return passThrough(req.Chunk), nil
 	}
 
-	// If TLS is active, pass through
+	// If TLS is active and we have a handler, use it
+	if session.IsTLS && session.TLSHandler != nil {
+		return session.TLSHandler.ProcessData(req.Chunk), nil
+	}
+
+	// If TLS is active but no handler (non-target host), pass through
 	if session.IsTLS {
 		return passThrough(req.Chunk), nil
 	}

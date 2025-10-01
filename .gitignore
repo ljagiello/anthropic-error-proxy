@@ -37,3 +37,4 @@ anthropic-error-plugin
 # Certificate files
 fault-ca.crt
 fault-ca.key
+plugin.log

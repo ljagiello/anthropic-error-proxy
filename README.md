@@ -4,26 +4,41 @@ A gRPC-based plugin for the Fault proxy that intercepts HTTPS traffic to `api.an
 
 ## Features
 
-- **TLS MITM Interception**: Intercepts and decrypts HTTPS traffic using dynamically generated certificates
+- **TLS Traffic Detection**: Identifies and monitors HTTPS/TLS traffic flows
 - **Probabilistic error injection**: Configure the likelihood of errors (0.0 to 1.0)
-- **Customizable error responses**: Set status codes, error messages, and headers
+- **Connection termination errors**: Simulates network failures and TLS errors
 - **Anthropic API specific**: Targets `api.anthropic.com` by default (configurable)
-- **Certificate generation**: Creates certificates on-the-fly signed by local CA
+- **Certificate generation**: Creates CA and domain certificates (for potential future MITM support)
 - **Session state tracking**: Maintains state for each tunnel connection
 - **gRPC plugin architecture**: Implements the Fault proxy plugin protocol
 
 ## How It Works
 
 1. **CONNECT Detection**: Intercepts CONNECT tunnel requests to identify target hosts
-2. **TLS Interception**: When TLS handshake is detected for target hosts:
-   - Generates a certificate for the target domain signed by our CA
-   - Responds with ServerHello using the generated certificate
-   - Establishes TLS session with the client
-3. **Traffic Modification**: Decrypts HTTPS traffic and can:
-   - Inject HTTP error responses based on probability
-   - Modify requests or responses
-   - Pass through unmodified traffic
-4. **Session Management**: Tracks each connection's state through the TLS handshake
+2. **TLS Detection**: When TLS handshake is detected for target hosts:
+   - Monitors TLS handshake messages (ClientHello, ServerHello, etc.)
+   - Tracks TLS session state through handshake completion
+   - Can inject errors at handshake time or during encrypted data transfer
+3. **Error Injection**: Based on configured probability:
+   - Terminates connections to simulate network failures
+   - Closes TLS sessions with error messages
+   - Simulates various HTTP status codes (429, 500, 503, etc.)
+4. **Session Management**: Tracks each connection's state through the TLS lifecycle
+
+### TLS MITM Limitations
+
+**IMPORTANT**: Due to the plugin architecture, this plugin **cannot** perform full TLS man-in-the-middle with decryption. The plugin operates on data chunks flowing through the proxy and doesn't have direct access to network connections, which is required for TLS termination and re-encryption.
+
+**What the plugin CAN do**:
+- Detect TLS handshake messages
+- Monitor TLS traffic flow
+- Terminate connections at any point to simulate failures
+- Inject errors during handshake or application data phases
+
+**What the plugin CANNOT do**:
+- Decrypt HTTPS traffic to read/modify HTTP requests/responses
+- Perform true TLS MITM with certificate substitution
+- Inspect the contents of encrypted application data
 
 ## Building
 
@@ -99,46 +114,16 @@ Note: `ca_cert` and `ca_key` fields are optional but must be provided together i
 
 ## CA Certificate Management
 
-### Important: Install the CA Certificate
+### Note on CA Certificates
 
-For TLS MITM to work properly, you **MUST** install the generated CA certificate in your system's trust store. Without this, clients will reject the dynamically generated certificates.
+The plugin generates a CA certificate and can create domain-specific certificates signed by this CA. However, **these certificates are not currently used for TLS MITM** due to plugin architecture limitations (see "TLS MITM Limitations" above).
 
-### Generating and Installing the CA
+The certificate generation functionality is included for:
+- Future proxy-level MITM support
+- Testing certificate generation
+- Demonstration purposes
 
-1. **Export the CA certificate**:
-```bash
-./anthropic-error-plugin --export-ca fault-proxy-ca.crt
-```
-
-2. **Install the CA certificate** (choose based on your OS):
-
-#### macOS
-```bash
-# System-wide trust
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain fault-proxy-ca.crt
-
-# Or user-only trust
-security add-trusted-cert -d -r trustRoot -k ~/Library/Keychains/login.keychain fault-proxy-ca.crt
-```
-
-#### Linux
-```bash
-# Ubuntu/Debian
-sudo cp fault-proxy-ca.crt /usr/local/share/ca-certificates/
-sudo update-ca-certificates
-
-# RHEL/CentOS/Fedora
-sudo cp fault-proxy-ca.crt /etc/pki/ca-trust/source/anchors/
-sudo update-ca-trust
-```
-
-#### Windows
-```powershell
-# Run as Administrator
-certutil -addstore -f "ROOT" fault-proxy-ca.crt
-```
-
-### CA Configuration Options
+### CA Configuration Options (Optional)
 
 - `--ca-cert`: Path to existing CA certificate file
 - `--ca-key`: Path to existing CA private key file
@@ -146,6 +131,19 @@ certutil -addstore -f "ROOT" fault-proxy-ca.crt
 - `--install-ca`: Show CA installation instructions
 
 Note: Both `--ca-cert` and `--ca-key` must be provided together if using existing CA files.
+
+### If You Need Full TLS MITM
+
+For actual HTTPS decryption and HTTP-level error injection, you would need:
+1. A proxy that supports TLS MITM at the connection level (not chunk level)
+2. Installation of the CA certificate in client trust stores
+3. Modified plugin architecture that provides decrypted traffic to plugins
+
+The current implementation focuses on **connection-level error injection** which is useful for testing:
+- Network resilience
+- Connection failure handling
+- Timeout scenarios
+- TLS handshake failures
 
 ## Error Response Examples
 
@@ -195,7 +193,7 @@ Note: Both `--ca-cert` and `--ca-key` must be provided together if using existin
 
 ## Integration with Fault Proxy
 
-The plugin works with the Fault proxy to intercept and modify HTTPS traffic:
+The plugin works with the Fault proxy to intercept HTTPS traffic and inject connection errors:
 
 ```bash
 # Start the plugin
@@ -212,7 +210,7 @@ fault run \
   --target https://api.anthropic.com
 ```
 
-**Important**: Ensure the CA certificate is installed in your system trust store before testing.
+The plugin will monitor TLS traffic to `api.anthropic.com` and randomly terminate connections based on the configured probability, simulating various failure scenarios.
 
 ## Plugin Protocol
 
