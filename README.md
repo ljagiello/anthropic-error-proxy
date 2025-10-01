@@ -1,26 +1,36 @@
 # Anthropic Error Injection Plugin
 
-A gRPC-based plugin for the Fault proxy that intercepts HTTPS requests to `api.anthropic.com` through tunneling proxies and injects configurable HTTP errors with specified probability.
+A gRPC-based plugin for the Fault proxy that can inject configurable HTTP errors with specified probability.
 
-## Features
+⚠️ **IMPORTANT LIMITATION**: This plugin currently **cannot intercept HTTPS traffic**. TLS MITM is not implemented, meaning it cannot inject errors into encrypted HTTPS requests to `api.anthropic.com`.
 
-- **Tunnel-based interception**: Works with HTTPS CONNECT tunneling, not just HTTP forwarding
-- **Probabilistic error injection**: Configure the likelihood of errors (0.0 to 1.0)
-- **Customizable error responses**: Set status codes, error messages, and headers
-- **Anthropic API specific**: Targets `api.anthropic.com` by default (configurable)
-- **gRPC plugin architecture**: Implements the Fault proxy plugin protocol
-- **Trusted CA generation**: Creates a CA certificate that can be added to system trust stores
-- **TLS interception**: Intercepts HTTPS traffic with proper certificate validation
+## Current Capabilities
 
-## How It Works
+### What Works ✅
+- **Plain HTTP traffic**: Can inject errors into unencrypted HTTP requests
+- **HTTP forward mode**: Handles direct HTTP proxy forwarding
+- **CONNECT tunnel detection**: Identifies tunnel establishment for HTTPS
+- **Session tracking**: Maintains state for each connection
+- **Probabilistic error injection**: For plain HTTP traffic only
 
-Unlike the standard HTTP error fault which only works with HTTP forwarding, this plugin:
+### What Doesn't Work ❌
+- **HTTPS interception**: Cannot decrypt or modify HTTPS traffic
+- **TLS MITM**: Not implemented despite CA certificate generation code
+- **Anthropic API error injection**: Since the API uses HTTPS exclusively
+- **Encrypted tunnel traffic**: Can detect but cannot modify
 
-1. Intercepts CONNECT tunnel requests to identify target hosts
-2. Buffers and analyzes tunneled HTTPS traffic
-3. Detects HTTP requests within the encrypted tunnel
-4. Injects error responses based on configured probability
-5. Maintains session state for each tunnel connection
+## How It Currently Works
+
+The plugin can only handle:
+
+1. Plain HTTP requests (non-encrypted)
+2. HTTP requests in CONNECT tunnels before TLS handshake begins
+3. Direct HTTP forwarding through the proxy
+
+When HTTPS traffic is detected, the plugin:
+- Logs that TLS was detected
+- Passes through all encrypted data unchanged
+- Cannot inject any errors
 
 ## Building
 
@@ -94,89 +104,19 @@ Example `config.json`:
 Note: `ca_cert` and `ca_key` fields are optional but must be provided together if used.
 
 
-## CA Certificate Management
+## CA Certificate (Currently Unused)
 
-### Generating and Installing the CA
+⚠️ **Note**: The plugin generates CA certificates but **does not use them** since TLS MITM is not implemented. The CA-related flags exist but have no practical effect on the plugin's operation.
 
-The plugin generates a Certificate Authority (CA) that must be trusted by your system to properly intercept HTTPS traffic without certificate errors.
+### CA-Related Flags (Non-functional)
 
-### Using Custom CA Files
+The following flags exist in the code but don't enable HTTPS interception:
+- `--ca-cert`: Path to CA certificate file
+- `--ca-key`: Path to CA private key file
+- `--export-ca`: Export CA certificate
+- `--install-ca`: Show CA installation instructions
 
-By default, the plugin generates and stores CA files as `fault-ca.crt` and `fault-ca.key` in the current directory. You can use existing CA files:
-
-```bash
-# Use existing CA files
-./anthropic-error-plugin \
-  --ca-cert /path/to/existing-ca.crt \
-  --ca-key /path/to/existing-ca.key
-
-# NOTE: Both --ca-cert and --ca-key must be provided together
-# The plugin will error if only one is provided
-
-# Export CA certificate from custom location
-./anthropic-error-plugin \
-  --ca-cert /path/to/my-ca.crt \
-  --ca-key /path/to/my-ca.key \
-  --export-ca exported-ca.crt
-
-# Or via config file
-{
-  "ca_cert": "/path/to/existing-ca.crt",
-  "ca_key": "/path/to/existing-ca.key",
-  ...
-}
-```
-
-#### CA File Requirements
-
-- **Both or neither**: You must provide both `--ca-cert` and `--ca-key`, or neither
-- **Without flags**: Plugin generates new CA files in current directory
-- **With both flags**: Plugin uses the specified existing CA files
-- **Invalid combinations**: Plugin will exit with an error if only one is provided
-
-#### Export the CA Certificate
-```bash
-./anthropic-error-plugin --export-ca fault-proxy-ca.crt
-```
-
-#### Installation Instructions
-```bash
-./anthropic-error-plugin --install-ca
-```
-
-#### macOS Installation
-```bash
-# System-wide trust
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain fault-proxy-ca.crt
-
-# User-only trust
-security add-trusted-cert -d -r trustRoot -k ~/Library/Keychains/login.keychain fault-proxy-ca.crt
-```
-
-#### Linux Installation
-```bash
-# Ubuntu/Debian
-sudo cp fault-proxy-ca.crt /usr/local/share/ca-certificates/
-sudo update-ca-certificates
-
-# RHEL/CentOS/Fedora
-sudo cp fault-proxy-ca.crt /etc/pki/ca-trust/source/anchors/
-sudo update-ca-trust
-```
-
-#### Windows Installation
-```powershell
-# Run as Administrator
-certutil -addstore -f "ROOT" fault-proxy-ca.crt
-```
-
-### Important Security Notes
-
-- The CA is generated with a 10-year validity period
-- Only install CAs from sources you trust
-- The CA allows the plugin to intercept and decrypt HTTPS traffic
-- After installation, the CA will appear as "Fault Proxy Root CA" in your certificate store
-- Restart applications/browsers after installing the CA
+These flags were intended for future TLS MITM implementation but currently serve no purpose since the plugin cannot decrypt HTTPS traffic.
 
 ## Error Response Examples
 
@@ -226,10 +166,16 @@ certutil -addstore -f "ROOT" fault-proxy-ca.crt
 
 ## Integration with Fault Proxy
 
-This plugin is designed to work with the Fault proxy in tunneling mode. Configure the Fault proxy to use this plugin for HTTPS tunnel traffic:
+⚠️ **LIMITATION**: This plugin cannot inject errors into HTTPS traffic to api.anthropic.com since it cannot decrypt TLS.
+
+The plugin can only handle:
+- Plain HTTP traffic (rare in production)
+- HTTP requests before TLS handshake in tunnels
+- Direct HTTP proxy forwarding
 
 ```bash
 # Example Fault proxy configuration (adjust based on actual Fault CLI)
+# Note: Will NOT work for HTTPS traffic to api.anthropic.com
 fault run \
   --mode tunnel \
   --plugin-endpoint localhost:50051 \

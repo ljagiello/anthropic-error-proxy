@@ -23,7 +23,7 @@ import (
 	pb "github.com/ljagiello/fault-anthropic-plugin/proto"
 )
 
-// Plugin handles both TLS and non-TLS traffic transparently
+// Plugin handles HTTP traffic and passes through HTTPS/TLS traffic
 type Plugin struct {
 	pb.UnimplementedPluginServiceServer
 	config         Config
@@ -60,9 +60,9 @@ type Session struct {
 	mutex            sync.Mutex
 }
 
-// NewPlugin creates a plugin that handles both TLS and non-TLS
+// NewPlugin creates a plugin that handles HTTP traffic
 func NewPlugin(config Config) (*Plugin, error) {
-	// Load or generate CA for TLS interception
+	// Load or generate CA (currently unused - TLS MITM not implemented)
 	rootCA, rootKey, err := loadOrGenerateRootCA(config.CACert, config.CAKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup CA: %w", err)
@@ -245,53 +245,8 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 	return newCert, newKey, nil
 }
 
-// getOrCreateCertificate gets or creates a certificate for a host
-func (p *Plugin) getOrCreateCertificate(host string) (*tls.Certificate, error) {
-	p.certMutex.RLock()
-	if cert, exists := p.certCache[host]; exists {
-		p.certMutex.RUnlock()
-		return cert, nil
-	}
-	p.certMutex.RUnlock()
 
-	// Generate new certificate signed by our CA
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, err
-	}
-
-	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			Organization: []string{"Fault Plugin"},
-			CommonName:   host,
-		},
-		DNSNames:              []string{host, "*." + host},
-		NotBefore:             time.Now().Add(-24 * time.Hour),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, p.rootCA, &priv.PublicKey, p.rootKey)
-	if err != nil {
-		return nil, err
-	}
-
-	cert := &tls.Certificate{
-		Certificate: [][]byte{certDER, p.rootCA.Raw},
-		PrivateKey:  priv,
-	}
-
-	p.certMutex.Lock()
-	p.certCache[host] = cert
-	p.certMutex.Unlock()
-
-	return cert, nil
-}
-
-// ProcessTunnelData handles both encrypted and unencrypted tunnel data
+// ProcessTunnelData handles tunnel data (can only modify plain HTTP, not HTTPS)
 func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDataRequest) (*pb.ProcessTunnelDataResponse, error) {
 	session := p.getOrCreateSession(req.Id)
 
@@ -370,26 +325,16 @@ func (p *Plugin) handleConnect(session *Session, chunk []byte) *pb.ProcessTunnel
 	return passThrough(chunk)
 }
 
-// handleTLSInterception sets up TLS MITM
+// handleTLSInterception handles TLS traffic (passes through without decryption)
 func (p *Plugin) handleTLSInterception(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
-	// Buffer the client hello
-	session.ClientBuffer.Write(chunk)
-
-	// Get certificate for this host
-	cert, err := p.getOrCreateCertificate(session.TargetHost)
-	if err != nil {
-		log.Printf("[Session %s] Failed to create certificate: %v", session.ID, err)
-		return passThrough(chunk)
-	}
-
-	_ = cert // Certificate is ready for future TLS implementation
-
-	// TLS MITM is not fully implemented due to plugin architecture limitations
-	log.Printf("[Session %s] TLS certificate ready for %s (MITM not implemented)", session.ID, session.TargetHost)
+	// TLS MITM is not implemented - this plugin cannot decrypt HTTPS traffic
+	// It can only pass through the encrypted data unchanged
+	// The CA certificate generation code exists but is not used for actual interception
+	log.Printf("[Session %s] TLS traffic detected for %s (passing through - cannot decrypt)", session.ID, session.TargetHost)
 	return passThrough(chunk)
 }
 
-// handleDecryptedTraffic handles traffic after TLS is established
+// handleDecryptedTraffic would handle decrypted traffic if TLS MITM was implemented
 func (p *Plugin) handleDecryptedTraffic(session *Session, chunk []byte) *pb.ProcessTunnelDataResponse {
 	return passThrough(chunk)
 }
@@ -576,7 +521,7 @@ func isHTTPRequest(data []byte) bool {
 func (p *Plugin) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
 	return &pb.HealthCheckResponse{
 		Healthy: true,
-		Message: "Plugin is healthy - handles both TLS and non-TLS traffic",
+		Message: "Plugin is healthy - handles HTTP traffic only (TLS passthrough)",
 	}, nil
 }
 
