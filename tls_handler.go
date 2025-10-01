@@ -29,7 +29,6 @@ type TLSHandler struct {
 
 	// Track what we've sent
 	connectReplied  bool
-	helloReplied    bool
 }
 
 // NewTLSHandler creates a new TLS handler for a session
@@ -128,7 +127,10 @@ func (h *TLSHandler) createServerHello() []byte {
 
 	// Random (32 bytes)
 	random := make([]byte, 32)
-	rand.Read(random)
+	if _, err := rand.Read(random); err != nil {
+		// Fall back to zeros if random fails (shouldn't happen)
+		log.Printf("[TLS-Handler] Warning: Failed to generate random bytes: %v", err)
+	}
 	buf.Write(random)
 
 	// Session ID length (0 for new session)
@@ -308,7 +310,8 @@ func (h *TLSHandler) ProcessHandshakeData(chunk []byte) *pb.ProcessTunnelDataRes
 	// Check what kind of handshake message this is
 	if len(chunk) > 5 {
 		contentType := chunk[0]
-		if contentType == 0x16 { // Handshake
+		switch contentType {
+		case 0x16: // Handshake
 			handshakeType := chunk[5]
 
 			switch handshakeType {
@@ -321,7 +324,7 @@ func (h *TLSHandler) ProcessHandshakeData(chunk []byte) *pb.ProcessTunnelDataRes
 				h.state = "established"
 				h.session.TLSEstablished = true
 			}
-		} else if contentType == 0x14 { // ChangeCipherSpec
+		case 0x14: // ChangeCipherSpec
 			log.Printf("[TLS-Handler %s] Received ChangeCipherSpec", h.session.ID)
 		}
 	}
