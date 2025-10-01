@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
+	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -54,9 +55,6 @@ type Session struct {
 	TLSServer        *tls.Conn
 	ClientReader     *bufio.Reader
 	ServerReader     *bufio.Reader
-
-	// TLS handler for this session
-	tlsHandler       *TLSHandler
 
 	// State tracking
 	LastErrorCheck   time.Time
@@ -183,7 +181,7 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 
 	// Generate new
 	log.Println("Generating new CA for TLS interception...")
-	newKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	newKey, err := rsa.GenerateKey(cryptorand.Reader, 2048)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -209,7 +207,7 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 		MaxPathLenZero:        true,
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &newKey.PublicKey, newKey)
+	certDER, err := x509.CreateCertificate(cryptorand.Reader, &template, &template, &newKey.PublicKey, newKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -251,6 +249,8 @@ func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.Pri
 
 // ProcessTunnelData handles tunnel data (can only modify plain HTTP, not HTTPS)
 func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDataRequest) (*pb.ProcessTunnelDataResponse, error) {
+	log.Printf("[ProcessTunnelData] Called with ID: %s, Side: %v, Direction: %v, ChunkSize: %d",
+		req.Id, req.Side, req.Direction, len(req.Chunk))
 	session := p.getOrCreateSession(req.Id)
 
 	session.mutex.Lock()
@@ -273,13 +273,12 @@ func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDat
 			session.HandshakeStarted = true
 			log.Printf("[Session %s] TLS handshake detected for %s", session.ID, session.TargetHost)
 
-			// Attempt TLS MITM if this is our target host
+			// For target host, we need to do TLS MITM
 			if session.TargetHost == p.config.TargetHost {
-				// Create TLS handler if not exists
-				if session.tlsHandler == nil {
-					session.tlsHandler = NewTLSHandler(session, p)
-				}
-				return session.tlsHandler.ProcessData(req.Chunk), nil
+				log.Printf("[Session %s] Target host matched - attempting TLS MITM", session.ID)
+				// For now, pass through while we fix TLS MITM
+				// TODO: Implement proper TLS termination
+				return passThrough(req.Chunk), nil
 			}
 
 			// Pass through for non-target hosts
@@ -287,9 +286,9 @@ func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDat
 		}
 	}
 
-	// If TLS is established, use the TLS handler
-	if session.TLSEstablished && session.tlsHandler != nil {
-		return session.tlsHandler.ProcessData(req.Chunk), nil
+	// If TLS is active, pass through
+	if session.IsTLS {
+		return passThrough(req.Chunk), nil
 	}
 
 	// Check for plain HTTP request
@@ -299,6 +298,84 @@ func (p *Plugin) ProcessTunnelData(ctx context.Context, req *pb.ProcessTunnelDat
 
 	// Default: pass through
 	return passThrough(req.Chunk), nil
+}
+
+// generateErrorResponse creates an appropriate error response based on status code
+func (p *Plugin) generateErrorResponse(statusCode int) string {
+	var statusText string
+	var errorType string
+	var message string
+
+	switch statusCode {
+	case 400:
+		statusText = "Bad Request"
+		errorType = "invalid_request_error"
+		message = "Your request was malformed or missing required parameters"
+	case 401:
+		statusText = "Unauthorized"
+		errorType = "authentication_error"
+		message = "Invalid authentication credentials"
+	case 403:
+		statusText = "Forbidden"
+		errorType = "permission_error"
+		message = "You do not have permission to access this resource"
+	case 429:
+		statusText = "Too Many Requests"
+		errorType = "rate_limit_error"
+		message = "Number of request tokens has exceeded your per-minute rate limit"
+	case 500:
+		statusText = "Internal Server Error"
+		errorType = "api_error"
+		message = "An unexpected error occurred"
+	case 502:
+		statusText = "Bad Gateway"
+		errorType = "api_error"
+		message = "Bad gateway"
+	case 503:
+		statusText = "Service Unavailable"
+		errorType = "overloaded_error"
+		message = "Service temporarily unavailable"
+	default:
+		statusText = http.StatusText(statusCode)
+		if statusText == "" {
+			statusText = "Error"
+		}
+		errorType = "api_error"
+		message = fmt.Sprintf("Error %d occurred", statusCode)
+	}
+
+	errorBody := fmt.Sprintf(`{"error": {"type": "%s", "message": "%s"}}`, errorType, message)
+
+	return fmt.Sprintf(
+		"HTTP/1.1 %d %s\r\n"+
+		"Content-Type: application/json\r\n"+
+		"Content-Length: %d\r\n"+
+		"Connection: close\r\n"+
+		"\r\n"+
+		"%s",
+		statusCode,
+		statusText,
+		len(errorBody),
+		errorBody,
+	)
+}
+
+// shouldInjectError determines if we should inject an error for this session
+func (p *Plugin) shouldInjectError(session *Session) bool {
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+
+	// Update last error check time
+	session.LastErrorCheck = time.Now()
+
+	// Check probability
+	if rand.Float64() > p.config.ErrorProbability {
+		log.Printf("[Session %s] Not injecting error (probability check failed)", session.ID)
+		return false
+	}
+
+	log.Printf("[Session %s] Will inject error (probability check passed)", session.ID)
+	return true
 }
 
 // handleConnect processes CONNECT requests
@@ -324,11 +401,25 @@ func (p *Plugin) handleConnect(session *Session, chunk []byte) *pb.ProcessTunnel
 			// Check if this is our target
 			if session.TargetHost == p.config.TargetHost {
 				log.Printf("[Session %s] Target host detected, will intercept", session.ID)
+
+				// Check if we should inject an error
+				if p.shouldInjectError(session) {
+					log.Printf("[Session %s] Injecting %d error for HTTPS CONNECT", session.ID, p.config.StatusCode)
+					// Generate appropriate error response based on status code
+					errorResponse := p.generateErrorResponse(p.config.StatusCode)
+					return &pb.ProcessTunnelDataResponse{
+						Action: &pb.ProcessTunnelDataResponse_Replace{
+							Replace: &pb.Replace{
+								ModifiedChunk: []byte(errorResponse),
+							},
+						},
+					}
+				}
 			}
 		}
 	}
 
-	// Pass through CONNECT request
+	// Pass through CONNECT request if no error injection
 	return passThrough(chunk)
 }
 
@@ -381,6 +472,7 @@ func (p *Plugin) handleHTTPRequest(session *Session, chunk []byte) *pb.ProcessTu
 
 // ProcessHttpRequest handles HTTP forward mode (non-tunnel)
 func (p *Plugin) ProcessHttpRequest(ctx context.Context, req *pb.ProcessHttpRequestRequest) (*pb.ProcessHttpRequestResponse, error) {
+	log.Printf("[ProcessHttpRequest] Called - Method: %s, Path: %s", req.Request.Method, req.Request.Path)
 	// Check host in headers
 	targetHost := ""
 	for _, header := range req.Request.Headers {
@@ -521,6 +613,7 @@ func (p *Plugin) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*
 
 // GetPluginInfo returns plugin metadata
 func (p *Plugin) GetPluginInfo(ctx context.Context, req *pb.GetPluginInfoRequest) (*pb.GetPluginInfoResponse, error) {
+	log.Println("========== [GetPluginInfo] CALLED ==========")
 	return &pb.GetPluginInfoResponse{
 		Name:      "anthropic-error-plugin",
 		Version:   "0.0.1",
