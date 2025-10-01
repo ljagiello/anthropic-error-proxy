@@ -30,4 +30,16 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
-anthropic-error-plugin
+
+# Binary
+anthropic-error-proxy
+
+# Certificate files
+fault-ca.crt
+fault-ca.key
+
+# Test files
+test_standalone.sh
+
+# Log files
+*.log

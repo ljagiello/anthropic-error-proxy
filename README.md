@@ -1,81 +1,129 @@
-# Anthropic Error Injection Plugin
+# Anthropic Error Proxy
 
-A gRPC-based plugin for the Fault proxy that intercepts HTTPS requests to `api.anthropic.com` through tunneling proxies and injects configurable HTTP errors with specified probability.
+A standalone HTTP/HTTPS proxy that intercepts traffic to `api.anthropic.com` and injects configurable HTTP errors with specified probability. Perfect for testing error handling in applications that use the Anthropic API.
 
 ## Features
 
-- **Tunnel-based interception**: Works with HTTPS CONNECT tunneling, not just HTTP forwarding
+- **Full TLS MITM**: Intercepts and decrypts HTTPS traffic using generated certificates
+- **HTTP Error Injection**: Returns actual HTTP error responses (429, 500, 503, etc.) over HTTPS
 - **Probabilistic error injection**: Configure the likelihood of errors (0.0 to 1.0)
-- **Customizable error responses**: Set status codes, error messages, and headers
 - **Anthropic API specific**: Targets `api.anthropic.com` by default (configurable)
-- **gRPC plugin architecture**: Implements the Fault proxy plugin protocol
+- **Pass-through mode**: Non-target traffic passes through unmodified
+- **Automatic certificate generation**: Creates CA and domain certificates for TLS interception
+- **Custom error responses**: Configure custom error bodies and headers
 
 ## How It Works
 
-Unlike the standard HTTP error fault which only works with HTTP forwarding, this plugin:
+1. **Proxy Setup**: The proxy listens on a configured port (default 8080) for HTTP/HTTPS traffic
+2. **CONNECT Handling**: When a CONNECT request is received for HTTPS:
+   - For target hosts: Performs TLS MITM to intercept and potentially modify traffic
+   - For other hosts: Transparently passes through the encrypted connection
+3. **TLS Interception**: For target hosts (e.g., api.anthropic.com):
+   - Performs TLS handshake with the client using a generated certificate
+   - Decrypts the HTTPS request
+   - Based on configured probability, either:
+     - Injects an HTTP error response with proper status code and JSON body
+     - Forwards the request to the real server (when not injecting errors)
+4. **Error Injection**: When triggered:
+   - Generates proper HTTP error response (429, 500, etc.)
+   - Includes appropriate JSON error body matching Anthropic's error format
+   - Encrypts and sends the response back to the client
 
-1. Intercepts CONNECT tunnel requests to identify target hosts
-2. Buffers and analyzes tunneled HTTPS traffic
-3. Detects HTTP requests within the encrypted tunnel
-4. Injects error responses based on configured probability
-5. Maintains session state for each tunnel connection
-
-## Building
-
-### Prerequisites
-
-- Go 1.24 or later
-- Protocol Buffers compiler (`protoc`)
-- gRPC Go plugins
-
-### Install Dependencies
-
-```bash
-make install-deps
-```
-
-### Build the Plugin
+## Installation
 
 ```bash
-make build
+# Clone the repository
+git clone https://github.com/ljagiello/anthropic-error-proxy.git
+cd anthropic-error-proxy
+
+# Build the proxy
+go build -o anthropic-error-proxy .
 ```
 
-### Docker Build
+## Usage
+
+### Basic Usage
+
+Run the proxy with default settings (10% error probability, HTTP 500):
 
 ```bash
-make docker-build
+./anthropic-error-proxy
 ```
 
-## Running
-
-### Command Line Options
+### Configure Error Injection
 
 ```bash
-./anthropic-error-plugin \
-  --port 50051 \
-  --error-probability 0.3 \
-  --status-code 429 \
-  --target-host api.anthropic.com
+# Always return HTTP 429 (Rate Limit) errors
+./anthropic-error-proxy --error-probability 1.0 --status-code 429
+
+# 50% chance of HTTP 503 (Service Unavailable) errors
+./anthropic-error-proxy --error-probability 0.5 --status-code 503
+
+# Custom proxy port
+./anthropic-error-proxy --proxy-port 8888
 ```
 
-### Available Flags
-
-- `--port`: gRPC server port (default: 50051)
-- `--config`: JSON configuration file path
-- `--error-probability`: Probability of error injection 0-1 (default: 0.1)
-- `--status-code`: HTTP status code to return (default: 500)
-- `--error-body`: Custom error response body JSON
-- `--target-host`: Target host to intercept (default: api.anthropic.com)
-
-### Using Configuration File
+### Using with curl
 
 ```bash
-./anthropic-error-plugin --config config.json
+# Configure curl to use the proxy
+curl -x http://localhost:8080 \
+  https://api.anthropic.com/v1/messages \
+  -H "x-api-key: YOUR_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-Example `config.json`:
+### Using with Python
+
+```python
+import requests
+
+proxies = {
+    'http': 'http://localhost:8080',
+    'https': 'http://localhost:8080',
+}
+
+# Disable SSL verification if using self-signed certificates
+response = requests.post(
+    'https://api.anthropic.com/v1/messages',
+    proxies=proxies,
+    verify=False,  # Only for testing with self-signed certificates
+    headers={
+        'x-api-key': 'YOUR_KEY',
+        'anthropic-version': '2023-06-01',
+    },
+    json={
+        'model': 'claude-3-5-sonnet-20241022',
+        'messages': [{'role': 'user', 'content': 'Hello'}],
+    }
+)
+```
+
+## Command Line Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--proxy-port` | Proxy listening port | 8080 |
+| `--error-probability` | Probability of error injection (0-1) | 0.1 |
+| `--status-code` | HTTP status code to return | 500 |
+| `--error-body` | Custom error response body JSON | Auto-generated |
+| `--target-host` | Target host to intercept | api.anthropic.com |
+| `--ca-cert` | Path to CA certificate file | fault-ca.crt |
+| `--ca-key` | Path to CA private key file | fault-ca.key |
+| `--export-ca` | Export CA certificate to specified file | - |
+| `--install-ca` | Show CA installation instructions | false |
+| `--config` | JSON configuration file path | - |
+| `--headers` | Custom headers as JSON | - |
+
+## Configuration File
+
+You can use a JSON configuration file instead of command line flags:
+
 ```json
 {
+  "proxy_port": 8080,
   "error_probability": 0.3,
   "status_code": 429,
   "target_host": "api.anthropic.com",
@@ -88,13 +136,46 @@ Example `config.json`:
 }
 ```
 
-### Docker Run
+```bash
+./anthropic-error-proxy --config config.json
+```
+
+## CA Certificate Management
+
+For HTTPS interception to work, clients need to trust the proxy's CA certificate.
+
+### Export CA Certificate
 
 ```bash
-docker run -p 50051:50051 anthropic-error-plugin:latest \
-  --error-probability 0.5 \
-  --status-code 503
+./anthropic-error-proxy --export-ca my-ca.crt
 ```
+
+### Installation Instructions
+
+```bash
+# Show platform-specific installation instructions
+./anthropic-error-proxy --install-ca
+```
+
+#### macOS
+```bash
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain fault-ca.crt
+```
+
+#### Linux (Ubuntu/Debian)
+```bash
+sudo cp fault-ca.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+```
+
+#### Windows
+```powershell
+certutil -addstore -f "ROOT" fault-ca.crt
+```
+
+### Security Note
+
+Only install CA certificates from sources you trust. The CA certificate allows the proxy to decrypt HTTPS traffic.
 
 ## Error Response Examples
 
@@ -105,17 +186,6 @@ docker run -p 50051:50051 anthropic-error-plugin:latest \
   "error": {
     "type": "rate_limit_error",
     "message": "Simulated error: Too Many Requests"
-  }
-}
-```
-
-### Service Unavailable (503)
-```json
-{
-  "type": "error",
-  "error": {
-    "type": "api_error",
-    "message": "Simulated error: Service Unavailable"
   }
 }
 ```
@@ -131,87 +201,73 @@ docker run -p 50051:50051 anthropic-error-plugin:latest \
 }
 ```
 
-## Integration with Fault Proxy
-
-This plugin is designed to work with the Fault proxy in tunneling mode. Configure the Fault proxy to use this plugin for HTTPS tunnel traffic:
-
-```bash
-# Example Fault proxy configuration (adjust based on actual Fault CLI)
-fault run \
-  --mode tunnel \
-  --plugin-endpoint localhost:50051 \
-  --target https://api.anthropic.com
+### Service Unavailable (503)
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "api_error",
+    "message": "Simulated error: Service Unavailable"
+  }
+}
 ```
 
-## Plugin Protocol
+## Supported Error Codes
 
-The plugin implements the following gRPC services:
-
-- `HealthCheck`: Reports plugin health status
-- `GetPluginInfo`: Returns plugin metadata
-- `GetPluginCapabilities`: Declares tunnel handling capability
-- `ProcessTunnelData`: Intercepts and potentially modifies tunnel data
+| Code | Error Type | Description |
+|------|------------|-------------|
+| 400 | `invalid_request_error` | Bad Request |
+| 401 | `authentication_error` | Unauthorized |
+| 403 | `permission_error` | Forbidden |
+| 404 | `not_found_error` | Not Found |
+| 413 | `request_too_large` | Request Entity Too Large |
+| 429 | `rate_limit_error` | Too Many Requests |
+| 500 | `api_error` | Internal Server Error |
+| 503 | `api_error` | Service Unavailable |
+| 529 | `overloaded_error` | Overloaded |
 
 ## Testing
 
-### Basic Test
-```bash
-# Start the plugin
-./anthropic-error-plugin --error-probability 1.0 --status-code 500
+Run the included test script:
 
-# In another terminal, configure proxy to use the plugin
-# Then make a request through the proxy
-curl -x http://localhost:8080 https://api.anthropic.com/v1/messages
+```bash
+chmod +x test_standalone.sh
+./test_standalone.sh
 ```
 
-### Unit Tests
-```bash
-make test
-```
-
-## Troubleshooting
-
-### Plugin Not Intercepting Requests
-- Ensure the plugin is running and listening on the correct port
-- Verify the proxy is configured to use the plugin endpoint
-- Check that tunnel mode is enabled in the proxy
-
-### Errors Not Being Injected
-- Verify `error_probability` is greater than 0
-- Check logs for session detection and interception messages
-- Ensure target host matches the actual API hostname
-
-### Connection Issues
-- Check firewall rules for the gRPC port (default 50051)
-- Verify network connectivity between proxy and plugin
-- Review plugin logs for connection errors
+This will:
+1. Test HTTPS interception for api.anthropic.com
+2. Verify pass-through for other hosts
+3. Test different error codes and probabilities
 
 ## Development
 
 ### Project Structure
 ```
-anthropic-error-plugin/
-├── main.go                 # Entry point and CLI
-├── plugin.go              # Plugin implementation
-├── plugin.proto           # Protocol buffer definitions
-├── proto/                 # Generated protobuf code
-├── generate.sh            # Proto generation script
-├── Makefile              # Build automation
-├── Dockerfile            # Container build
-├── config.example.json   # Example configuration
+anthropic-error-proxy/
+├── main.go                # Entry point and CLI handling
+├── proxy.go               # Proxy implementation
+├── common.go             # Common utilities and types
+├── common_test.go        # Tests for common utilities
+├── go.mod                # Go module definition
 └── README.md            # This file
 ```
 
-### Making Changes
+### Building from Source
 
-1. Modify the plugin logic in `plugin.go`
-2. Update protocol buffers if needed in `plugin.proto`
-3. Regenerate proto code: `make proto`
-4. Build and test: `make build && make test`
+```bash
+go build -o anthropic-error-proxy .
+```
+
+### Running Tests
+
+```bash
+go test ./...
+```
 
 ## License
 
-This plugin is part of the Fault project. See the main project for license information.
+Apache License 2.0
 
 ## Contributing
 
@@ -219,4 +275,3 @@ Contributions are welcome! Please ensure:
 - Code follows Go best practices
 - Tests are included for new features
 - Documentation is updated as needed
-- The plugin protocol is properly implemented
