@@ -26,7 +26,7 @@ Unlike the standard HTTP error fault which only works with HTTP forwarding, this
 
 ### Prerequisites
 
-- Go 1.21 or later
+- Go 1.25 or later
 - Protocol Buffers compiler (`protoc`)
 - gRPC Go plugins
 
@@ -258,6 +258,16 @@ curl -x http://localhost:8080 https://api.anthropic.com/v1/messages
 make test
 ```
 
+### Run Tests with Coverage
+```bash
+go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+```
+
+### Run Benchmarks
+```bash
+go test -bench=. ./...
+```
+
 ## Troubleshooting
 
 ### Plugin Not Intercepting Requests
@@ -301,10 +311,36 @@ anthropic-error-plugin/
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
+## CI/CD
+
+This project uses GitHub Actions for continuous integration:
+
+- **Linting**: Runs `golangci-lint` on every PR
+- **Testing**: Runs tests with race detection on Go 1.25
+- **Branch Protection**: Main branch requires PR reviews and passing checks
+- **Dependency Updates**: Dependabot configured for weekly updates
+
 ## Contributing
 
 Contributions are welcome! Please ensure:
-- Code follows Go best practices
-- Tests are included for new features
+- Code follows Go best practices and passes `golangci-lint`
+- Tests are included for new features (run `make test`)
+- All CI checks pass before requesting review
 - Documentation is updated as needed
 - The plugin protocol is properly implemented
+
+### Development Workflow
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature-name`)
+3. Make your changes
+4. Run tests (`make test`)
+5. Run linter (`golangci-lint run`)
+6. Commit your changes
+7. Push to your fork
+8. Create a Pull Request
+
+All PRs require:
+- Passing lint checks
+- Passing tests
+- At least one approving review
