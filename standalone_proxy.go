@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -426,4 +428,101 @@ func RunStandaloneProxy() {
 	if err := proxy.Start(); err != nil {
 		log.Fatalf("Failed to start proxy: %v", err)
 	}
+}
+
+// loadOrGenerateRootCA loads an existing CA or generates a new one
+func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	// Default paths if not specified
+	if certPath == "" {
+		certPath = "fault-ca.crt"
+	}
+	if keyPath == "" {
+		keyPath = "fault-ca.key"
+	}
+
+	// Try to load existing CA
+	if certData, err := os.ReadFile(certPath); err == nil {
+		if keyData, err := os.ReadFile(keyPath); err == nil {
+			// Parse certificate
+			certBlock, _ := pem.Decode(certData)
+			if certBlock != nil {
+				cert, err := x509.ParseCertificate(certBlock.Bytes)
+				if err == nil {
+					// Parse private key
+					keyBlock, _ := pem.Decode(keyData)
+					if keyBlock != nil {
+						key, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+						if err == nil {
+							log.Printf("Loaded existing CA from %s", certPath)
+							return cert, key, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Generate new CA
+	log.Printf("Generating new CA certificate...")
+
+	// Generate private key
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Create certificate template
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Country:      []string{"US"},
+			Province:     []string{""},
+			Locality:     []string{"San Francisco"},
+			Organization: []string{"Fault Proxy"},
+			CommonName:   "Fault Proxy Root CA",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(365 * 24 * 10 * time.Hour), // 10 years
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	// Generate certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Parse the certificate
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Save certificate
+	certOut, err := os.Create(certPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer certOut.Close()
+
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return nil, nil, err
+	}
+
+	// Save private key
+	keyOut, err := os.Create(keyPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer keyOut.Close()
+
+	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}); err != nil {
+		return nil, nil, err
+	}
+
+	log.Printf("Generated new CA certificate: %s", certPath)
+	return cert, privateKey, nil
 }

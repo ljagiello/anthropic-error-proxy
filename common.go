@@ -1,15 +1,7 @@
 package main
 
-import (
-	"crypto/rand"
-	"math/big"
-
-	pb "github.com/ljagiello/fault-anthropic-plugin/proto"
-)
-
-// Config holds the plugin configuration
+// Config holds the proxy configuration
 type Config struct {
-	Port             int               `json:"port,omitempty"`
 	ProxyPort        int               `json:"proxy_port,omitempty"`
 	ErrorProbability float64           `json:"error_probability"`
 	StatusCode       int               `json:"status_code"`
@@ -61,32 +53,4 @@ func getStatusText(code int) string {
 		return text
 	}
 	return "Error"
-}
-
-// passThrough creates a pass-through response
-func passThrough(chunk []byte) *pb.ProcessTunnelDataResponse {
-	return &pb.ProcessTunnelDataResponse{
-		Action: &pb.ProcessTunnelDataResponse_PassThrough{
-			PassThrough: &pb.PassThrough{
-				Chunk: chunk,
-			},
-		},
-	}
-}
-
-// shouldInjectError decides whether to inject an error based on probability
-func shouldInjectError(probability float64) bool {
-	if probability <= 0 {
-		return false
-	}
-	if probability >= 1 {
-		return true
-	}
-
-	n, err := rand.Int(rand.Reader, big.NewInt(10000))
-	if err != nil {
-		return false
-	}
-
-	return float64(n.Int64())/10000.0 < probability
 }

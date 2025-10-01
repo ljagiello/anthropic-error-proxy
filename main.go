@@ -5,53 +5,41 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
-	"runtime"
-
-	pb "github.com/ljagiello/fault-anthropic-plugin/proto"
-	"google.golang.org/grpc"
 )
 
 func main() {
-	var (
-		port             = flag.Int("port", 50051, "gRPC plugin port")
-		standalone       = flag.Bool("standalone", false, "Run as standalone HTTP/HTTPS proxy")
-		proxyPort        = flag.Int("proxy-port", 8080, "Proxy port in standalone mode")
-		configFile       = flag.String("config", "", "Config file path (JSON)")
-		errorProb        = flag.Float64("error-probability", 0.1, "Probability of injecting an error (0-1)")
-		statusCode       = flag.Int("status-code", 500, "HTTP status code to return")
-		errorBody        = flag.String("error-body", "", "Custom error response body (JSON)")
-		targetHost       = flag.String("target-host", "api.anthropic.com", "Target host to intercept")
-		verbose          = flag.Bool("verbose", false, "Enable verbose logging")
-		exportCA         = flag.String("export-ca", "", "Export CA certificate to specified file")
-		installCA        = flag.Bool("install-ca", false, "Show instructions to install CA certificate")
-		caCert           = flag.String("ca-cert", "", "Path to existing CA certificate file")
-		caKey            = flag.String("ca-key", "", "Path to existing CA private key file")
-	)
+	var config Config
+
+	// Parse flags
+	flag.Float64Var(&config.ErrorProbability, "error-probability", 0.1, "Probability of error injection (0-1)")
+	flag.IntVar(&config.StatusCode, "status-code", 500, "HTTP status code to return on error")
+	flag.StringVar(&config.ErrorBody, "error-body", "", "Custom error response body")
+	flag.StringVar(&config.TargetHost, "target-host", "api.anthropic.com", "Target host to intercept")
+	flag.StringVar(&config.CACert, "ca-cert", "", "Path to CA certificate file")
+	flag.StringVar(&config.CAKey, "ca-key", "", "Path to CA private key file")
+	flag.IntVar(&config.ProxyPort, "proxy-port", 8080, "Proxy listening port")
+
+	// Custom headers flag
+	var headersFlag string
+	flag.StringVar(&headersFlag, "headers", "", "Custom headers as JSON")
+
+	// Config file
+	var configFile string
+	flag.StringVar(&configFile, "config", "", "Config file path (JSON)")
+
+	// Export/install CA
+	var exportCA string
+	var installCA bool
+	flag.StringVar(&exportCA, "export-ca", "", "Export CA certificate to specified file")
+	flag.BoolVar(&installCA, "install-ca", false, "Show CA certificate installation instructions")
+
 	flag.Parse()
 
-	// Validate CA certificate and key flags
-	if (*caCert != "" && *caKey == "") || (*caCert == "" && *caKey != "") {
-		log.Fatalf("Error: Both --ca-cert and --ca-key must be provided together, or neither")
-	}
-
-	// Initialize config
-	config := Config{
-		ErrorProbability: *errorProb,
-		StatusCode:       *statusCode,
-		ErrorBody:        *errorBody,
-		TargetHost:       *targetHost,
-		Headers:          make(map[string]string),
-		CACert:           *caCert,
-		CAKey:            *caKey,
-		ProxyPort:        *proxyPort,
-	}
-
 	// Load config from file if provided
-	if *configFile != "" {
-		log.Printf("Loading config from file: %s", *configFile)
-		data, err := os.ReadFile(*configFile)
+	if configFile != "" {
+		log.Printf("Loading config from file: %s", configFile)
+		data, err := os.ReadFile(configFile)
 		if err != nil {
 			log.Fatalf("Failed to read config file: %v", err)
 		}
@@ -60,161 +48,91 @@ func main() {
 		}
 	}
 
-	// Validate config
+	// Parse headers
+	if headersFlag != "" {
+		if err := json.Unmarshal([]byte(headersFlag), &config.Headers); err != nil {
+			log.Fatalf("Failed to parse headers: %v", err)
+		}
+	}
+
+	// Validate probability
 	if config.ErrorProbability < 0 || config.ErrorProbability > 1 {
-		log.Fatalf("Error probability must be between 0 and 1, got: %.2f", config.ErrorProbability)
-	}
-
-	// Set logging level
-	if !*verbose {
-		log.SetFlags(log.LstdFlags)
-	}
-
-	// Run in standalone mode if requested
-	if *standalone {
-		log.Printf("========================================")
-		log.Printf("Anthropic Error Proxy - Standalone Mode")
-		log.Printf("========================================")
-		log.Printf("Proxy port: %d", config.ProxyPort)
-		log.Printf("Target host: %s", config.TargetHost)
-		log.Printf("Error probability: %.2f", config.ErrorProbability)
-		log.Printf("Status code: %d", config.StatusCode)
-		if config.ErrorBody != "" {
-			log.Printf("Custom error body: %s", config.ErrorBody)
-		}
-		log.Printf("========================================")
-
-		// Create and run standalone proxy
-		proxy, err := NewStandaloneProxy(config)
-		if err != nil {
-			log.Fatalf("Failed to create standalone proxy: %v", err)
-		}
-
-		if err := proxy.Start(); err != nil {
-			log.Fatalf("Failed to start standalone proxy: %v", err)
-		}
-		return
-	}
-
-	// Plugin mode
-	log.Printf("========================================")
-	log.Printf("Anthropic Error Plugin v0.0.1")
-	log.Printf("========================================")
-	log.Printf("Port: %d", *port)
-	log.Printf("Target host: %s", config.TargetHost)
-	log.Printf("Error probability: %.2f", config.ErrorProbability)
-	log.Printf("Status code: %d", config.StatusCode)
-	if config.ErrorBody != "" {
-		log.Printf("Custom error body: %s", config.ErrorBody)
-	}
-	log.Printf("========================================")
-	log.Printf("Capabilities:")
-	log.Printf("  ✅ HTTP traffic (plain)")
-	log.Printf("  ✅ HTTPS traffic (with CONNECT)")
-	log.Printf("  ✅ HTTP forward mode")
-	log.Printf("  ✅ Tunnel mode")
-	log.Printf("========================================")
-
-	// Create the plugin that handles both TLS and non-TLS
-	plugin, err := NewPlugin(config)
-	if err != nil {
-		log.Fatalf("Failed to create plugin: %v", err)
+		log.Fatalf("Error probability must be between 0 and 1")
 	}
 
 	// Handle CA certificate export/installation
-	if *exportCA != "" || *installCA {
-		// Determine CA certificate file path
-		certFile := "fault-ca.crt"
-		if *caCert != "" {
-			certFile = *caCert
-		}
-
-		certData, err := os.ReadFile(certFile)
-		if err != nil {
-			log.Fatalf("Failed to read CA certificate from %s: %v", certFile, err)
-		}
-
-		if *exportCA != "" {
-			// Export to specified file
-			err := os.WriteFile(*exportCA, certData, 0644)
-			if err != nil {
-				log.Fatalf("Failed to export CA certificate: %v", err)
-			}
-			fmt.Printf("CA certificate exported to: %s\n", *exportCA)
-		}
-
-		if *installCA {
-			fmt.Println("\n========================================")
-			fmt.Println("CA CERTIFICATE INSTALLATION INSTRUCTIONS")
-			fmt.Println("========================================")
-
-			fmt.Printf("The CA certificate is located at: %s\n\n", certFile)
-
-			switch runtime.GOOS {
-			case "darwin":
-				fmt.Println("macOS Installation:")
-				fmt.Println("-------------------")
-				fmt.Printf("1. Export the certificate:\n")
-				fmt.Printf("   ./anthropic-error-plugin --export-ca fault-proxy-ca.crt\n\n")
-				fmt.Printf("2. Add to System Keychain:\n")
-				fmt.Printf("   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain fault-proxy-ca.crt\n\n")
-				fmt.Printf("3. Or add to Login Keychain (user only):\n")
-				fmt.Printf("   security add-trusted-cert -d -r trustRoot -k ~/Library/Keychains/login.keychain fault-proxy-ca.crt\n\n")
-				fmt.Println("Alternative: Open Keychain Access app, drag the .crt file, and mark as 'Always Trust'")
-
-			case "linux":
-				fmt.Println("Linux Installation:")
-				fmt.Println("------------------")
-				fmt.Printf("1. Export the certificate:\n")
-				fmt.Printf("   ./anthropic-error-plugin --export-ca fault-proxy-ca.crt\n\n")
-				fmt.Printf("2. For Ubuntu/Debian:\n")
-				fmt.Printf("   sudo cp fault-proxy-ca.crt /usr/local/share/ca-certificates/\n")
-				fmt.Printf("   sudo update-ca-certificates\n\n")
-				fmt.Printf("3. For RHEL/CentOS/Fedora:\n")
-				fmt.Printf("   sudo cp fault-proxy-ca.crt /etc/pki/ca-trust/source/anchors/\n")
-				fmt.Printf("   sudo update-ca-trust\n\n")
-
-			case "windows":
-				fmt.Println("Windows Installation:")
-				fmt.Println("--------------------")
-				fmt.Printf("1. Export the certificate:\n")
-				fmt.Printf("   .\\anthropic-error-plugin.exe --export-ca fault-proxy-ca.crt\n\n")
-				fmt.Printf("2. Install via Command Prompt (Admin):\n")
-				fmt.Printf("   certutil -addstore -f \"ROOT\" fault-proxy-ca.crt\n\n")
-				fmt.Printf("Alternative: Double-click the .crt file and follow the Certificate Import Wizard\n")
-			}
-
-			fmt.Println("\n========================================")
-			fmt.Println("IMPORTANT NOTES:")
-			fmt.Println("========================================")
-			fmt.Println("1. Installing this CA allows the plugin to intercept HTTPS traffic")
-			fmt.Println("2. Only install CAs from sources you trust")
-			fmt.Println("3. The CA is valid for 10 years from generation")
-			fmt.Println("4. After installation, restart your applications/browsers")
-			fmt.Println("5. To verify: The CA should appear as 'Fault Proxy Root CA' in your certificate store")
-			fmt.Println()
-
-			os.Exit(0)
-		}
+	if exportCA != "" || installCA {
+		handleCAOperations(exportCA, installCA, config.CACert)
+		os.Exit(0)
 	}
 
-	// Start gRPC server
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	// Print banner
+	fmt.Println("========================================")
+	fmt.Println("Anthropic Error Proxy")
+	fmt.Println("========================================")
+	fmt.Printf("Proxy port: %d\n", config.ProxyPort)
+	fmt.Printf("Target host: %s\n", config.TargetHost)
+	fmt.Printf("Error probability: %.2f\n", config.ErrorProbability)
+	fmt.Printf("Status code: %d\n", config.StatusCode)
+	if config.ErrorBody != "" {
+		fmt.Printf("Custom error body: %s\n", config.ErrorBody)
+	}
+	fmt.Println("========================================")
+
+	// Create and start proxy
+	proxy, err := NewStandaloneProxy(config)
 	if err != nil {
-		log.Fatalf("Failed to listen on port %d: %v", *port, err)
+		log.Fatalf("Failed to create proxy: %v", err)
 	}
 
-	opts := []grpc.ServerOption{
-		grpc.MaxRecvMsgSize(10 * 1024 * 1024), // 10MB
-		grpc.MaxSendMsgSize(10 * 1024 * 1024), // 10MB
+	if err := proxy.Start(); err != nil {
+		log.Fatalf("Failed to start proxy: %v", err)
+	}
+}
+
+func handleCAOperations(exportCA string, installCA bool, caCertPath string) {
+	// Determine CA certificate file path
+	certFile := "fault-ca.crt"
+	if caCertPath != "" {
+		certFile = caCertPath
 	}
 
-	s := grpc.NewServer(opts...)
-	pb.RegisterPluginServiceServer(s, plugin)
+	certData, err := os.ReadFile(certFile)
+	if err != nil {
+		log.Fatalf("Failed to read CA certificate from %s: %v", certFile, err)
+	}
 
-	log.Printf("Plugin listening on port %d...", *port)
+	if exportCA != "" {
+		// Export to specified file
+		err := os.WriteFile(exportCA, certData, 0644)
+		if err != nil {
+			log.Fatalf("Failed to export CA certificate: %v", err)
+		}
+		fmt.Printf("CA certificate exported to: %s\n", exportCA)
+	}
 
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("Failed to serve: %v", err)
+	if installCA {
+		fmt.Println("\n========================================")
+		fmt.Println("CA CERTIFICATE INSTALLATION INSTRUCTIONS")
+		fmt.Println("========================================")
+		fmt.Printf("The CA certificate is located at: %s\n\n", certFile)
+
+		fmt.Println("macOS Installation:")
+		fmt.Println("-------------------")
+		fmt.Printf("sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain %s\n\n", certFile)
+
+		fmt.Println("Linux Installation:")
+		fmt.Println("------------------")
+		fmt.Printf("sudo cp %s /usr/local/share/ca-certificates/\n", certFile)
+		fmt.Println("sudo update-ca-certificates\n")
+
+		fmt.Println("Windows Installation:")
+		fmt.Println("--------------------")
+		fmt.Printf("certutil -addstore -f \"ROOT\" %s\n\n", certFile)
+
+		fmt.Println("========================================")
+		fmt.Println("Note: Installing this CA allows the proxy to intercept HTTPS traffic")
+		fmt.Println("Only install CAs from sources you trust")
+		fmt.Println("========================================")
 	}
 }

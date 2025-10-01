@@ -32,12 +32,14 @@ go.work.sum
 # .vscode/
 
 # Binary
-anthropic-error-plugin
+anthropic-error-proxy
 
 # Certificate files
 fault-ca.crt
 fault-ca.key
-plugin.log
 
 # Test files
 test_standalone.sh
+
+# Log files
+*.log
