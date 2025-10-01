@@ -85,7 +85,9 @@ Example `config.json`:
     "X-RateLimit-Limit": "1000",
     "X-RateLimit-Remaining": "0",
     "Retry-After": "60"
-  }
+  },
+  "ca_cert": "/path/to/ca.crt",  // optional - both ca_cert and ca_key must be provided together
+  "ca_key": "/path/to/ca.key"    // optional - both ca_cert and ca_key must be provided together
 }
 ```
 
@@ -310,15 +312,6 @@ anthropic-error-plugin/
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## CI/CD
-
-This project uses GitHub Actions for continuous integration:
-
-- **Linting**: Runs `golangci-lint` on every PR
-- **Testing**: Runs tests with race detection on Go 1.25
-- **Branch Protection**: Main branch requires PR reviews and passing checks
-- **Dependency Updates**: Dependabot configured for weekly updates
 
 ## Contributing
 
