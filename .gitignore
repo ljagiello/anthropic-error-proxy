@@ -38,3 +38,6 @@ anthropic-error-plugin
 fault-ca.crt
 fault-ca.key
 plugin.log
+
+# Test files
+test_standalone.sh
