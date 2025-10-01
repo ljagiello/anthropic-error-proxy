@@ -4,41 +4,62 @@ A gRPC-based plugin for the Fault proxy that intercepts HTTPS traffic to `api.an
 
 ## Features
 
-- **TLS Traffic Detection**: Identifies and monitors HTTPS/TLS traffic flows
+- **Full TLS MITM**: Implements complete TLS server to intercept and decrypt HTTPS traffic
+- **HTTP Error Injection**: Returns actual HTTP 429 (or other status codes) responses over HTTPS
 - **Probabilistic error injection**: Configure the likelihood of errors (0.0 to 1.0)
-- **Connection termination errors**: Simulates network failures and TLS errors
 - **Anthropic API specific**: Targets `api.anthropic.com` by default (configurable)
-- **Certificate generation**: Creates CA and domain certificates (for potential future MITM support)
-- **Session state tracking**: Maintains state for each tunnel connection
+- **Automatic certificate generation**: Creates CA and domain certificates for TLS interception
+- **Session state tracking**: Maintains TLS state across multiple data chunks
 - **gRPC plugin architecture**: Implements the Fault proxy plugin protocol
 
 ## How It Works
 
-1. **CONNECT Detection**: Intercepts CONNECT tunnel requests to identify target hosts
-2. **TLS Detection**: When TLS handshake is detected for target hosts:
-   - Monitors TLS handshake messages (ClientHello, ServerHello, etc.)
-   - Tracks TLS session state through handshake completion
-   - Can inject errors at handshake time or during encrypted data transfer
-3. **Error Injection**: Based on configured probability:
-   - Terminates connections to simulate network failures
-   - Closes TLS sessions with error messages
-   - Simulates various HTTP status codes (429, 500, 503, etc.)
-4. **Session Management**: Tracks each connection's state through the TLS lifecycle
+1. **TLS Detection**: When TLS ClientHello is detected for target hosts:
+   - Initializes a full TLS server using Go's `crypto/tls` package
+   - Uses `net.Pipe()` to bridge chunk-based data flow with TLS connection
+   - Generates and signs certificates for the target domain
 
-### TLS MITM Limitations
+2. **TLS Handshake**:
+   - Receives ClientHello from the actual client
+   - Performs TLS handshake as the server
+   - Returns ServerHello, Certificate, and other handshake messages
+   - Establishes encrypted TLS session
 
-**IMPORTANT**: Due to the plugin architecture, this plugin **cannot** perform full TLS man-in-the-middle with decryption. The plugin operates on data chunks flowing through the proxy and doesn't have direct access to network connections, which is required for TLS termination and re-encryption.
+3. **HTTP Request Processing**:
+   - Decrypts incoming HTTPS request over the established TLS connection
+   - Parses HTTP request from decrypted stream
+   - Applies error injection based on configured probability
 
-**What the plugin CAN do**:
-- Detect TLS handshake messages
-- Monitor TLS traffic flow
-- Terminate connections at any point to simulate failures
-- Inject errors during handshake or application data phases
+4. **Error Injection**: When error is triggered:
+   - Generates HTTP error response (e.g., HTTP 429 with JSON body)
+   - Encrypts response using established TLS session
+   - Sends encrypted response back to client
+   - Client receives proper HTTP 429 error, not connection failure
 
-**What the plugin CANNOT do**:
-- Decrypt HTTPS traffic to read/modify HTTP requests/responses
-- Perform true TLS MITM with certificate substitution
-- Inspect the contents of encrypted application data
+5. **Session Management**:
+   - Runs TLS server in dedicated goroutine per session
+   - Buffers responses across multiple chunk calls
+   - Properly handles TLS state machine timing
+
+### TLS MITM Implementation
+
+The plugin implements a **full TLS man-in-the-middle** proxy that:
+
+**✓ DOES**:
+- Intercepts TLS ClientHello and becomes the TLS server
+- Performs complete TLS handshake with the client
+- Decrypts HTTPS traffic to read HTTP requests
+- Generates and sends encrypted HTTP error responses
+- Returns proper HTTP status codes (429, 500, 503, etc.) over HTTPS
+- Maintains TLS session state across chunk-based data flow
+
+**Architecture**:
+- Uses `net.Pipe()` to create bidirectional connection
+- Runs `tls.Server()` in goroutine to handle TLS protocol
+- Feeds incoming chunks to pipe, drains encrypted responses
+- Works within plugin's chunk-based processing model
+
+**Note**: Clients must trust the plugin's CA certificate for TLS verification to succeed. Use `--export-ca` and `--install-ca` flags for CA setup.
 
 ## Building
 
@@ -114,16 +135,11 @@ Note: `ca_cert` and `ca_key` fields are optional but must be provided together i
 
 ## CA Certificate Management
 
-### Note on CA Certificates
+### CA Certificate Setup
 
-The plugin generates a CA certificate and can create domain-specific certificates signed by this CA. However, **these certificates are not currently used for TLS MITM** due to plugin architecture limitations (see "TLS MITM Limitations" above).
+The plugin performs full TLS MITM, which requires clients to trust the plugin's CA certificate. Without this, clients will reject the TLS connection due to certificate validation failures.
 
-The certificate generation functionality is included for:
-- Future proxy-level MITM support
-- Testing certificate generation
-- Demonstration purposes
-
-### CA Configuration Options (Optional)
+### CA Configuration Options
 
 - `--ca-cert`: Path to existing CA certificate file
 - `--ca-key`: Path to existing CA private key file
@@ -132,18 +148,40 @@ The certificate generation functionality is included for:
 
 Note: Both `--ca-cert` and `--ca-key` must be provided together if using existing CA files.
 
-### If You Need Full TLS MITM
+### CA Setup Steps
 
-For actual HTTPS decryption and HTTP-level error injection, you would need:
-1. A proxy that supports TLS MITM at the connection level (not chunk level)
-2. Installation of the CA certificate in client trust stores
-3. Modified plugin architecture that provides decrypted traffic to plugins
+1. **Export the CA Certificate**:
+```bash
+./anthropic-error-plugin --export-ca fault-ca.crt
+```
 
-The current implementation focuses on **connection-level error injection** which is useful for testing:
-- Network resilience
-- Connection failure handling
-- Timeout scenarios
-- TLS handshake failures
+2. **Install CA Certificate** (varies by platform):
+
+**macOS**:
+```bash
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain fault-ca.crt
+```
+
+**Linux (Ubuntu/Debian)**:
+```bash
+sudo cp fault-ca.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+```
+
+**Windows**:
+```powershell
+certutil -addstore -f "ROOT" fault-ca.crt
+```
+
+3. **Verify Installation**:
+Run your HTTPS client and verify it accepts the plugin's certificates.
+
+### Security Considerations
+
+- The CA private key (`fault-ca.key`) should be kept secure
+- Only install the CA certificate on systems where you control the plugin
+- Remove the CA certificate when testing is complete
+- Never share the CA private key
 
 ## Error Response Examples
 

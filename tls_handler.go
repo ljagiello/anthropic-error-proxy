@@ -1,14 +1,21 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
+	"net"
+	"net/http"
+	"sync"
 	"time"
 
 	pb "github.com/ljagiello/fault-anthropic-plugin/proto"
@@ -16,14 +23,9 @@ import (
 
 // TLSHandler manages TLS interception for a session
 //
-// IMPORTANT NOTE: Full TLS MITM with decryption is not possible in this plugin architecture
-// because the plugin operates on data chunks flowing through the proxy and doesn't have
-// direct access to network connections.
-//
-// This handler provides:
-// 1. TLS handshake detection
-// 2. Connection termination with errors for testing failure scenarios
-// 3. Certificate generation (for potential future proxy-level MITM support)
+// This handler implements a full TLS server to intercept HTTPS traffic
+// and inject HTTP error responses. It works within the chunk-based architecture
+// by maintaining TLS state across multiple ProcessData calls.
 type TLSHandler struct {
 	session *Session
 	plugin  *Plugin
@@ -33,16 +35,31 @@ type TLSHandler struct {
 	handshakeComplete bool
 	errorInjected     bool
 
-	// Certificate for this domain (generated but not used for MITM in current architecture)
-	cert *tls.Certificate
+	// TLS server state
+	cert           *tls.Certificate
+	tlsConn        *tls.Conn
+	clientConn     net.Conn      // Client side of pipe
+	serverConn     net.Conn      // Server side of pipe
+	tlsInitialized bool
+	tlsServerDone  chan error    // Signals when TLS server goroutine is done
+	mutex          sync.Mutex
+
+	// Buffers for data flow
+	responseBuffer *bytes.Buffer // Buffered TLS responses to send to client
+	responseMutex  sync.Mutex
+
+	// HTTP request parsing
+	httpRequest *http.Request
 }
 
 // NewTLSHandler creates a new TLS handler for a session
 func NewTLSHandler(session *Session, plugin *Plugin) *TLSHandler {
 	return &TLSHandler{
-		session: session,
-		plugin:  plugin,
-		state:   "init",
+		session:        session,
+		plugin:         plugin,
+		state:          "init",
+		responseBuffer: &bytes.Buffer{},
+		tlsServerDone:  make(chan error, 1),
 	}
 }
 
@@ -114,207 +131,285 @@ func (h *TLSHandler) generateCertForHost(hostname string) (*tls.Certificate, err
 
 // ProcessData is the main entry point for processing TLS data
 func (h *TLSHandler) ProcessData(chunk []byte) *pb.ProcessTunnelDataResponse {
-	// Detect what type of TLS message this is
+	h.mutex.Lock()
+	defer h.mutex.Unlock()
+
 	if len(chunk) == 0 {
 		return passThrough(chunk)
 	}
 
-	// Check if this is a TLS record
-	if !isTLSRecord(chunk) {
-		// Not a TLS record, pass through
-		return passThrough(chunk)
-	}
-
-	contentType := chunk[0]
-
-	switch contentType {
-	case 0x16: // Handshake
-		return h.processHandshake(chunk)
-
-	case 0x14: // ChangeCipherSpec
-		log.Printf("[TLS-Handler %s] ChangeCipherSpec message", h.session.ID)
-		h.handshakeComplete = true
-		return passThrough(chunk)
-
-	case 0x15: // Alert
-		log.Printf("[TLS-Handler %s] TLS Alert message", h.session.ID)
-		return passThrough(chunk)
-
-	case 0x17: // Application Data
-		return h.processApplicationData(chunk)
-
-	default:
-		log.Printf("[TLS-Handler %s] Unknown TLS content type: 0x%02x", h.session.ID, contentType)
-		return passThrough(chunk)
-	}
-}
-
-// processHandshake processes TLS handshake messages
-func (h *TLSHandler) processHandshake(chunk []byte) *pb.ProcessTunnelDataResponse {
-	if len(chunk) < 6 {
-		return passThrough(chunk)
-	}
-
-	handshakeType := chunk[5]
-
-	switch handshakeType {
-	case 0x01: // ClientHello
-		log.Printf("[TLS-Handler %s] ClientHello detected", h.session.ID)
-		h.state = "client_hello_seen"
-
-		// Generate certificate for potential future use
-		if h.cert == nil {
-			cert, err := h.generateCertForHost(h.session.TargetHost)
-			if err != nil {
-				log.Printf("[TLS-Handler %s] Failed to generate certificate: %v", h.session.ID, err)
-			} else {
-				h.cert = cert
-			}
-		}
-
-		// Check if we should inject an error at handshake time
-		if shouldInjectError(h.plugin.config.ErrorProbability) {
-			h.errorInjected = true
-			log.Printf("[TLS-Handler %s] 💉 Injecting TLS connection error", h.session.ID)
-
-			// Close the connection with an error message
+	// Initialize TLS connection on first chunk
+	if !h.tlsInitialized {
+		if err := h.initTLSServer(); err != nil {
+			log.Printf("[TLS-Handler %s] Failed to initialize TLS server: %v", h.session.ID, err)
 			return &pb.ProcessTunnelDataResponse{
 				Action: &pb.ProcessTunnelDataResponse_Close{
 					Close: &pb.Close{
-						Reason: fmt.Sprintf("Simulated TLS error: HTTP %d %s",
-							h.plugin.config.StatusCode,
-							getStatusText(h.plugin.config.StatusCode)),
+						Reason: fmt.Sprintf("TLS initialization failed: %v", err),
 					},
 				},
 			}
 		}
 
-		return passThrough(chunk)
+		// Start the response reading goroutine
+		if err := h.processTLSStateMachine(); err != nil {
+			log.Printf("[TLS-Handler %s] TLS state machine error: %v", h.session.ID, err)
+			return &pb.ProcessTunnelDataResponse{
+				Action: &pb.ProcessTunnelDataResponse_Close{
+					Close: &pb.Close{
+						Reason: fmt.Sprintf("TLS error: %v", err),
+					},
+				},
+			}
+		}
 
-	case 0x02: // ServerHello
-		log.Printf("[TLS-Handler %s] ServerHello detected", h.session.ID)
-		h.state = "server_hello_seen"
-		return passThrough(chunk)
-
-	case 0x0B: // Certificate
-		log.Printf("[TLS-Handler %s] Certificate message", h.session.ID)
-		return passThrough(chunk)
-
-	case 0x0C: // ServerKeyExchange
-		log.Printf("[TLS-Handler %s] ServerKeyExchange message", h.session.ID)
-		return passThrough(chunk)
-
-	case 0x0E: // ServerHelloDone
-		log.Printf("[TLS-Handler %s] ServerHelloDone message", h.session.ID)
-		return passThrough(chunk)
-
-	case 0x10: // ClientKeyExchange
-		log.Printf("[TLS-Handler %s] ClientKeyExchange message", h.session.ID)
-		return passThrough(chunk)
-
-	case 0x14: // Finished
-		log.Printf("[TLS-Handler %s] Finished message", h.session.ID)
-		h.handshakeComplete = true
-		return passThrough(chunk)
-
-	default:
-		log.Printf("[TLS-Handler %s] Unknown handshake type: 0x%02x", h.session.ID, handshakeType)
-		return passThrough(chunk)
+		h.tlsInitialized = true
 	}
-}
 
-// processApplicationData processes encrypted application data
-// NOTE: Cannot decrypt in this architecture, but we can:
-// 1. Pass through normally
-// 2. Close connection to simulate errors
-// 3. Buffer data (if needed for timing attacks)
-func (h *TLSHandler) processApplicationData(chunk []byte) *pb.ProcessTunnelDataResponse {
-	log.Printf("[TLS-Handler %s] Processing TLS application data (%d bytes)", h.session.ID, len(chunk))
-
-	// We can't decrypt the data in this architecture, but we can simulate errors
-	// by closing the connection
-	if !h.errorInjected && shouldInjectError(h.plugin.config.ErrorProbability) {
-		h.errorInjected = true
-		log.Printf("[TLS-Handler %s] 💉 Injecting connection termination during application data", h.session.ID)
-
-		// Determine error message based on config
-		errorMsg := fmt.Sprintf("Simulated error: HTTP %d %s",
-			h.plugin.config.StatusCode,
-			getStatusText(h.plugin.config.StatusCode))
-
-		// Close the connection to simulate a network/TLS error
+	// Feed incoming chunk to the client connection (which feeds the TLS server)
+	n, err := h.clientConn.Write(chunk)
+	if err != nil {
+		log.Printf("[TLS-Handler %s] Failed to write to client conn: %v", h.session.ID, err)
 		return &pb.ProcessTunnelDataResponse{
 			Action: &pb.ProcessTunnelDataResponse_Close{
 				Close: &pb.Close{
-					Reason: errorMsg,
+					Reason: fmt.Sprintf("Write error: %v", err),
 				},
 			},
 		}
 	}
+	log.Printf("[TLS-Handler %s] Fed %d bytes to TLS server", h.session.ID, n)
 
-	// Normal case: pass through the encrypted data
-	return passThrough(chunk)
+	// Give the TLS server goroutine time to process and generate responses
+	time.Sleep(10 * time.Millisecond)
+
+	// Check if we have response data to send
+	h.responseMutex.Lock()
+	if h.responseBuffer.Len() > 0 {
+		responseData := h.responseBuffer.Bytes()
+		h.responseBuffer.Reset()
+		h.responseMutex.Unlock()
+
+		log.Printf("[TLS-Handler %s] Sending %d bytes of TLS response", h.session.ID, len(responseData))
+		return &pb.ProcessTunnelDataResponse{
+			Action: &pb.ProcessTunnelDataResponse_Replace{
+				Replace: &pb.Replace{
+					ModifiedChunk: responseData,
+				},
+			},
+		}
+	}
+	h.responseMutex.Unlock()
+
+	// Check if TLS server is done
+	select {
+	case err := <-h.tlsServerDone:
+		if err != nil {
+			log.Printf("[TLS-Handler %s] TLS server finished with error: %v", h.session.ID, err)
+		} else {
+			log.Printf("[TLS-Handler %s] TLS server finished successfully", h.session.ID)
+		}
+
+		// Drain any remaining response data
+		h.responseMutex.Lock()
+		if h.responseBuffer.Len() > 0 {
+			responseData := h.responseBuffer.Bytes()
+			h.responseBuffer.Reset()
+			h.responseMutex.Unlock()
+
+			log.Printf("[TLS-Handler %s] Sending final %d bytes of TLS response", h.session.ID, len(responseData))
+			return &pb.ProcessTunnelDataResponse{
+				Action: &pb.ProcessTunnelDataResponse_Replace{
+					Replace: &pb.Replace{
+						ModifiedChunk: responseData,
+					},
+				},
+			}
+		}
+		h.responseMutex.Unlock()
+
+		// Close the connection
+		return &pb.ProcessTunnelDataResponse{
+			Action: &pb.ProcessTunnelDataResponse_Close{
+				Close: &pb.Close{
+					Reason: "TLS session complete",
+				},
+			},
+		}
+	default:
+		// TLS server still processing
+	}
+
+	// Drop the original chunk since we're handling the connection
+	return &pb.ProcessTunnelDataResponse{
+		Action: &pb.ProcessTunnelDataResponse_Replace{
+			Replace: &pb.Replace{
+				ModifiedChunk: []byte{}, // Empty response, waiting for TLS processing
+			},
+		},
+	}
 }
 
-// isTLSRecord checks if data looks like a TLS record
-func isTLSRecord(data []byte) bool {
-	if len(data) < 5 {
-		return false
+// initTLSServer initializes the TLS server connection
+func (h *TLSHandler) initTLSServer() error {
+	// Generate certificate for this host
+	cert, err := h.generateCertForHost(h.session.TargetHost)
+	if err != nil {
+		return fmt.Errorf("failed to generate certificate: %w", err)
+	}
+	h.cert = cert
+
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS13,
 	}
 
-	// TLS record format:
-	// - Content Type (1 byte): 0x14-0x18
-	// - Version (2 bytes): 0x0301 (TLS 1.0), 0x0302 (TLS 1.1), 0x0303 (TLS 1.2/1.3)
-	// - Length (2 bytes)
+	// Create a pipe: clientConn is what we feed data into, serverConn is what TLS server uses
+	h.clientConn, h.serverConn = net.Pipe()
 
-	contentType := data[0]
-	if contentType < 0x14 || contentType > 0x18 {
-		return false
-	}
+	// Create TLS server connection
+	h.tlsConn = tls.Server(h.serverConn, tlsConfig)
 
-	// Check version
-	if data[1] != 0x03 {
-		return false
-	}
+	// Start TLS server goroutine
+	go h.runTLSServer()
 
-	if data[2] < 0x01 || data[2] > 0x04 {
-		return false
-	}
-
-	return true
+	log.Printf("[TLS-Handler %s] TLS server initialized for %s", h.session.ID, h.session.TargetHost)
+	return nil
 }
 
-// createTLSAlert creates a TLS alert message (for potential future use)
-func (h *TLSHandler) createTLSAlert(level byte, description byte) []byte {
-	// TLS Alert format:
-	// Record header (5 bytes) + Alert (2 bytes)
-	return []byte{
-		0x15,       // Content Type: Alert
-		0x03, 0x03, // Version: TLS 1.2
-		0x00, 0x02, // Length: 2 bytes
-		level,      // Alert level (1=warning, 2=fatal)
-		description, // Alert description
+// runTLSServer runs the TLS server logic in a goroutine
+func (h *TLSHandler) runTLSServer() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[TLS-Handler %s] TLS server panic: %v", h.session.ID, r)
+			h.tlsServerDone <- fmt.Errorf("panic: %v", r)
+		}
+	}()
+
+	// Perform TLS handshake
+	err := h.tlsConn.Handshake()
+	if err != nil {
+		log.Printf("[TLS-Handler %s] TLS handshake failed: %v", h.session.ID, err)
+		h.tlsServerDone <- err
+		return
 	}
+
+	log.Printf("[TLS-Handler %s] ✓ TLS handshake complete", h.session.ID)
+	h.mutex.Lock()
+	h.handshakeComplete = true
+	h.mutex.Unlock()
+
+	// Read HTTP request
+	reader := bufio.NewReader(h.tlsConn)
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		log.Printf("[TLS-Handler %s] Failed to read HTTP request: %v", h.session.ID, err)
+		h.tlsServerDone <- err
+		return
+	}
+
+	log.Printf("[TLS-Handler %s] Received HTTP request: %s %s", h.session.ID, req.Method, req.URL.Path)
+
+	// Check if we should inject an error
+	h.mutex.Lock()
+	shouldInject := shouldInjectError(h.plugin.config.ErrorProbability)
+	h.mutex.Unlock()
+
+	if shouldInject {
+		h.injectHTTPError()
+	} else {
+		// Pass through - but in TLS MITM mode, we'd need to proxy to real server
+		// For now, just close the connection
+		log.Printf("[TLS-Handler %s] Not injecting error, closing connection", h.session.ID)
+	}
+
+	h.tlsServerDone <- nil
 }
 
-// Common TLS alert descriptions (for reference)
-const (
-	TLSAlertCloseNotify            byte = 0
-	TLSAlertUnexpectedMessage      byte = 10
-	TLSAlertBadRecordMAC           byte = 20
-	TLSAlertHandshakeFailure       byte = 40
-	TLSAlertBadCertificate         byte = 42
-	TLSAlertCertificateRevoked     byte = 44
-	TLSAlertCertificateExpired     byte = 45
-	TLSAlertCertificateUnknown     byte = 46
-	TLSAlertIllegalParameter       byte = 47
-	TLSAlertUnknownCA              byte = 48
-	TLSAlertAccessDenied           byte = 49
-	TLSAlertDecodeError            byte = 50
-	TLSAlertDecryptError           byte = 51
-	TLSAlertProtocolVersion        byte = 70
-	TLSAlertInternalError          byte = 80
-	TLSAlertInappropriateFallback  byte = 86
-	TLSAlertUserCanceled           byte = 90
-	TLSAlertUnrecognizedName       byte = 112
-)
+// processTLSStateMachine processes the TLS state machine
+func (h *TLSHandler) processTLSStateMachine() error {
+	// Start a goroutine to read responses from the client side of the pipe
+	// and buffer them for sending back to the actual client
+	go func() {
+		buf := make([]byte, 32*1024) // 32KB buffer
+		for {
+			n, err := h.clientConn.Read(buf)
+			if n > 0 {
+				h.responseMutex.Lock()
+				h.responseBuffer.Write(buf[:n])
+				h.responseMutex.Unlock()
+				log.Printf("[TLS-Handler %s] Buffered %d bytes of response data", h.session.ID, n)
+			}
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("[TLS-Handler %s] Client conn read error: %v", h.session.ID, err)
+				}
+				return
+			}
+		}
+	}()
+
+	return nil
+}
+
+// injectHTTPError generates and sends an HTTP error response over TLS
+func (h *TLSHandler) injectHTTPError() {
+	h.mutex.Lock()
+	h.errorInjected = true
+	h.mutex.Unlock()
+
+	log.Printf("[TLS-Handler %s] 💉 Injecting HTTP %d error over TLS", h.session.ID, h.plugin.config.StatusCode)
+
+	// Build HTTP error response
+	errorBody := h.buildErrorBody()
+
+	response := fmt.Sprintf(
+		"HTTP/1.1 %d %s\r\n"+
+			"Content-Type: application/json\r\n"+
+			"Content-Length: %d\r\n"+
+			"Connection: close\r\n"+
+			"Date: %s\r\n"+
+			"\r\n"+
+			"%s",
+		h.plugin.config.StatusCode,
+		getStatusText(h.plugin.config.StatusCode),
+		len(errorBody),
+		time.Now().UTC().Format(http.TimeFormat),
+		errorBody,
+	)
+
+	// Write HTTP response through TLS connection
+	// This will encrypt the response and send it through the pipe
+	_, err := h.tlsConn.Write([]byte(response))
+	if err != nil {
+		log.Printf("[TLS-Handler %s] Failed to write HTTP error response: %v", h.session.ID, err)
+		return
+	}
+
+	log.Printf("[TLS-Handler %s] Wrote HTTP %d error response (%d bytes plain, will be encrypted)",
+		h.session.ID, h.plugin.config.StatusCode, len(response))
+
+	// Close the TLS connection to signal we're done
+	h.tlsConn.Close()
+}
+
+// buildErrorBody creates the JSON error body
+func (h *TLSHandler) buildErrorBody() string {
+	if h.plugin.config.ErrorBody != "" {
+		return h.plugin.config.ErrorBody
+	}
+
+	errorData := map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
+			"type":    getErrorType(h.plugin.config.StatusCode),
+			"message": fmt.Sprintf("Simulated error: %s", getStatusText(h.plugin.config.StatusCode)),
+		},
+	}
+
+	bodyBytes, _ := json.Marshal(errorData)
+	return string(bodyBytes)
+}
+
