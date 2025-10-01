@@ -86,10 +86,12 @@ Example `config.json`:
     "X-RateLimit-Remaining": "0",
     "Retry-After": "60"
   },
-  "ca_cert": "/path/to/ca.crt",  // optional - both ca_cert and ca_key must be provided together
-  "ca_key": "/path/to/ca.key"    // optional - both ca_cert and ca_key must be provided together
+  "ca_cert": "/path/to/ca.crt",
+  "ca_key": "/path/to/ca.key"
 }
 ```
+
+Note: `ca_cert` and `ca_key` fields are optional but must be provided together if used.
 
 
 ## CA Certificate Management
@@ -321,19 +323,3 @@ Contributions are welcome! Please ensure:
 - All CI checks pass before requesting review
 - Documentation is updated as needed
 - The plugin protocol is properly implemented
-
-### Development Workflow
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature-name`)
-3. Make your changes
-4. Run tests (`make test`)
-5. Run linter (`golangci-lint run`)
-6. Commit your changes
-7. Push to your fork
-8. Create a Pull Request
-
-All PRs require:
-- Passing lint checks
-- Passing tests
-- At least one approving review
