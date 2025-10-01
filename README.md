@@ -245,33 +245,6 @@ The plugin implements the following gRPC services:
 - `GetPluginCapabilities`: Declares tunnel handling capability
 - `ProcessTunnelData`: Intercepts and potentially modifies tunnel data
 
-## Testing
-
-### Basic Test
-```bash
-# Start the plugin
-./anthropic-error-plugin --error-probability 1.0 --status-code 500
-
-# In another terminal, configure proxy to use the plugin
-# Then make a request through the proxy
-curl -x http://localhost:8080 https://api.anthropic.com/v1/messages
-```
-
-### Unit Tests
-```bash
-make test
-```
-
-### Run Tests with Coverage
-```bash
-go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
-```
-
-### Run Benchmarks
-```bash
-go test -bench=. ./...
-```
-
 ## Troubleshooting
 
 ### Plugin Not Intercepting Requests
