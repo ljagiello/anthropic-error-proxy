@@ -14,6 +14,8 @@ type Config struct {
 	ErrorBody        string            `json:"error_body"`
 	TargetHost       string            `json:"target_host"`
 	Headers          map[string]string `json:"headers"`
+	CACert           string            `json:"ca_cert,omitempty"`
+	CAKey            string            `json:"ca_key,omitempty"`
 }
 
 // getErrorType returns appropriate error type for status code
@@ -27,10 +29,14 @@ func getErrorType(code int) string {
 		return "permission_error"
 	case 404:
 		return "not_found_error"
+	case 413:
+		return "request_too_large"
 	case 429:
 		return "rate_limit_error"
-	case 500, 502, 503, 504:
+	case 500:
 		return "api_error"
+	case 529:
+		return "overloaded_error"
 	default:
 		return "error"
 	}
@@ -43,11 +49,10 @@ func getStatusText(code int) string {
 		401: "Unauthorized",
 		403: "Forbidden",
 		404: "Not Found",
+		413: "Request Entity Too Large",
 		429: "Too Many Requests",
 		500: "Internal Server Error",
-		502: "Bad Gateway",
-		503: "Service Unavailable",
-		504: "Gateway Timeout",
+		529: "Overloaded",
 	}
 
 	if text, ok := statusTexts[code]; ok {

@@ -9,6 +9,8 @@ A gRPC-based plugin for the Fault proxy that intercepts HTTPS requests to `api.a
 - **Customizable error responses**: Set status codes, error messages, and headers
 - **Anthropic API specific**: Targets `api.anthropic.com` by default (configurable)
 - **gRPC plugin architecture**: Implements the Fault proxy plugin protocol
+- **Trusted CA generation**: Creates a CA certificate that can be added to system trust stores
+- **TLS interception**: Intercepts HTTPS traffic with proper certificate validation
 
 ## How It Works
 
@@ -24,7 +26,7 @@ Unlike the standard HTTP error fault which only works with HTTP forwarding, this
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go 1.21 or later
 - Protocol Buffers compiler (`protoc`)
 - gRPC Go plugins
 
@@ -40,11 +42,6 @@ make install-deps
 make build
 ```
 
-### Docker Build
-
-```bash
-make docker-build
-```
 
 ## Running
 
@@ -66,6 +63,10 @@ make docker-build
 - `--status-code`: HTTP status code to return (default: 500)
 - `--error-body`: Custom error response body JSON
 - `--target-host`: Target host to intercept (default: api.anthropic.com)
+- `--ca-cert`: Path to existing CA certificate file (must be used with --ca-key)
+- `--ca-key`: Path to existing CA private key file (must be used with --ca-cert)
+- `--export-ca`: Export CA certificate to specified file
+- `--install-ca`: Show CA certificate installation instructions
 
 ### Using Configuration File
 
@@ -88,13 +89,90 @@ Example `config.json`:
 }
 ```
 
-### Docker Run
+
+## CA Certificate Management
+
+### Generating and Installing the CA
+
+The plugin generates a Certificate Authority (CA) that must be trusted by your system to properly intercept HTTPS traffic without certificate errors.
+
+### Using Custom CA Files
+
+By default, the plugin generates and stores CA files as `fault-ca.crt` and `fault-ca.key` in the current directory. You can use existing CA files:
 
 ```bash
-docker run -p 50051:50051 anthropic-error-plugin:latest \
-  --error-probability 0.5 \
-  --status-code 503
+# Use existing CA files
+./anthropic-error-plugin \
+  --ca-cert /path/to/existing-ca.crt \
+  --ca-key /path/to/existing-ca.key
+
+# NOTE: Both --ca-cert and --ca-key must be provided together
+# The plugin will error if only one is provided
+
+# Export CA certificate from custom location
+./anthropic-error-plugin \
+  --ca-cert /path/to/my-ca.crt \
+  --ca-key /path/to/my-ca.key \
+  --export-ca exported-ca.crt
+
+# Or via config file
+{
+  "ca_cert": "/path/to/existing-ca.crt",
+  "ca_key": "/path/to/existing-ca.key",
+  ...
+}
 ```
+
+#### CA File Requirements
+
+- **Both or neither**: You must provide both `--ca-cert` and `--ca-key`, or neither
+- **Without flags**: Plugin generates new CA files in current directory
+- **With both flags**: Plugin uses the specified existing CA files
+- **Invalid combinations**: Plugin will exit with an error if only one is provided
+
+#### Export the CA Certificate
+```bash
+./anthropic-error-plugin --export-ca fault-proxy-ca.crt
+```
+
+#### Installation Instructions
+```bash
+./anthropic-error-plugin --install-ca
+```
+
+#### macOS Installation
+```bash
+# System-wide trust
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain fault-proxy-ca.crt
+
+# User-only trust
+security add-trusted-cert -d -r trustRoot -k ~/Library/Keychains/login.keychain fault-proxy-ca.crt
+```
+
+#### Linux Installation
+```bash
+# Ubuntu/Debian
+sudo cp fault-proxy-ca.crt /usr/local/share/ca-certificates/
+sudo update-ca-certificates
+
+# RHEL/CentOS/Fedora
+sudo cp fault-proxy-ca.crt /etc/pki/ca-trust/source/anchors/
+sudo update-ca-trust
+```
+
+#### Windows Installation
+```powershell
+# Run as Administrator
+certutil -addstore -f "ROOT" fault-proxy-ca.crt
+```
+
+### Important Security Notes
+
+- The CA is generated with a 10-year validity period
+- Only install CAs from sources you trust
+- The CA allows the plugin to intercept and decrypt HTTPS traffic
+- After installation, the CA will appear as "Fault Proxy Root CA" in your certificate store
+- Restart applications/browsers after installing the CA
 
 ## Error Response Examples
 
@@ -109,13 +187,24 @@ docker run -p 50051:50051 anthropic-error-plugin:latest \
 }
 ```
 
-### Service Unavailable (503)
+### Overloaded Error (529)
 ```json
 {
   "type": "error",
   "error": {
-    "type": "api_error",
-    "message": "Simulated error: Service Unavailable"
+    "type": "overloaded_error",
+    "message": "Simulated error: Overloaded"
+  }
+}
+```
+
+### Request Too Large (413)
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "request_too_large",
+    "message": "Simulated error: Request Entity Too Large"
   }
 }
 ```
@@ -193,11 +282,10 @@ make test
 anthropic-error-plugin/
 ├── main.go                 # Entry point and CLI
 ├── plugin.go              # Plugin implementation
+├── common.go              # Common types and utilities
 ├── plugin.proto           # Protocol buffer definitions
 ├── proto/                 # Generated protobuf code
-├── generate.sh            # Proto generation script
 ├── Makefile              # Build automation
-├── Dockerfile            # Container build
 ├── config.example.json   # Example configuration
 └── README.md            # This file
 ```

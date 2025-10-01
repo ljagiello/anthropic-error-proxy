@@ -8,5 +8,7 @@
     "X-RateLimit-Remaining": "0",
     "X-RateLimit-Reset": "1234567890",
     "Retry-After": "60"
-  }
+  },
+  "ca_cert": "/path/to/existing-ca.crt",
+  "ca_key": "/path/to/existing-ca.key"
 }

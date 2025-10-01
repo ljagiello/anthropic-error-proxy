@@ -63,7 +63,7 @@ type Session struct {
 // NewSmartPlugin creates a plugin that handles both TLS and non-TLS
 func NewSmartPlugin(config Config) (*SmartPlugin, error) {
 	// Load or generate CA for TLS interception
-	rootCA, rootKey, err := loadOrGenerateRootCA()
+	rootCA, rootKey, err := loadOrGenerateRootCA(config.CACert, config.CAKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup CA: %w", err)
 	}
@@ -114,9 +114,21 @@ func (p *SmartPlugin) cleanupSessions() {
 }
 
 // loadOrGenerateRootCA loads or creates a CA certificate
-func loadOrGenerateRootCA() (*x509.Certificate, *rsa.PrivateKey, error) {
-	certFile := "plugin-ca-cert.pem"
-	keyFile := "plugin-ca-key.pem"
+func loadOrGenerateRootCA(certPath, keyPath string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	var certFile, keyFile string
+
+	if certPath != "" && keyPath != "" {
+		// Use provided paths
+		certFile = certPath
+		keyFile = keyPath
+	} else if certPath == "" && keyPath == "" {
+		// Use default names for generated CA
+		certFile = "fault-ca.crt"
+		keyFile = "fault-ca.key"
+	} else {
+		// This should never happen due to validation in main, but check anyway
+		return nil, nil, fmt.Errorf("both CA certificate and key paths must be provided, or neither")
+	}
 
 	// Try to load existing
 	if certPEM, err := os.ReadFile(certFile); err == nil {
@@ -148,15 +160,22 @@ func loadOrGenerateRootCA() (*x509.Certificate, *rsa.PrivateKey, error) {
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			Organization: []string{"Fault Plugin CA"},
-			CommonName:   "Fault Plugin Root CA",
+			Organization:  []string{"Fault Proxy"},
+			Country:       []string{"US"},
+			Province:      []string{""},
+			Locality:      []string{"San Francisco"},
+			StreetAddress: []string{""},
+			PostalCode:    []string{""},
+			CommonName:    "Fault Proxy Root CA",
 		},
 		NotBefore:             time.Now().Add(-24 * time.Hour),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour), // 10 years
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
@@ -170,13 +189,29 @@ func loadOrGenerateRootCA() (*x509.Certificate, *rsa.PrivateKey, error) {
 	}
 
 	// Save for future use
-	certOut, _ := os.Create(certFile)
-	pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	certOut.Close()
+	certOut, err := os.Create(certFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create cert file: %w", err)
+	}
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		_ = certOut.Close()
+		return nil, nil, fmt.Errorf("failed to encode certificate: %w", err)
+	}
+	if err := certOut.Close(); err != nil {
+		return nil, nil, fmt.Errorf("failed to close cert file: %w", err)
+	}
 
-	keyOut, _ := os.Create(keyFile)
-	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	keyOut.Close()
+	keyOut, err := os.Create(keyFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create key file: %w", err)
+	}
+	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
+		_ = keyOut.Close()
+		return nil, nil, fmt.Errorf("failed to encode private key: %w", err)
+	}
+	if err := keyOut.Close(); err != nil {
+		return nil, nil, fmt.Errorf("failed to close key file: %w", err)
+	}
 
 	log.Printf("Generated CA certificate: %s", certFile)
 	return cert, key, nil
@@ -529,10 +564,10 @@ func (p *SmartPlugin) HealthCheck(ctx context.Context, req *pb.HealthCheckReques
 // GetPluginInfo returns plugin metadata
 func (p *SmartPlugin) GetPluginInfo(ctx context.Context, req *pb.GetPluginInfoRequest) (*pb.GetPluginInfoResponse, error) {
 	return &pb.GetPluginInfoResponse{
-		Name:      "anthropic-smart-plugin",
-		Version:   "4.0.0",
-		Author:    "Fault Project",
-		Url:       "https://github.com/ljagiello/fault-anthropic-plugin",
+		Name:      "anthropic-error-plugin",
+		Version:   "0.0.1",
+		Author:    "Lukasz Jagiello",
+		Url:       "https://github.com/ljagiello/fault-anthropic-error-plugin",
 		Platform:  "linux,darwin,windows",
 		Direction: pb.GetPluginInfoResponse_BOTH,
 		Side:      pb.GetPluginInfoResponse_ANY,
