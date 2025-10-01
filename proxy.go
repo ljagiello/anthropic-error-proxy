@@ -304,60 +304,115 @@ func (p *Proxy) handleHTTP(clientConn net.Conn, request *http.Request) {
 		return
 	}
 
-	// For localhost requests, try both IPv4 and IPv6
+	// Build target URL
 	targetURL := request.URL.String()
-	if strings.HasPrefix(request.Host, "localhost:") {
-		// Replace localhost with 127.0.0.1 to force IPv4
-		targetURL = strings.Replace(targetURL, "localhost", "127.0.0.1", 1)
+
+	// For localhost, force 127.0.0.1 to avoid IPv6 issues
+	if strings.HasPrefix(request.Host, "localhost") {
+		targetURL = strings.Replace(targetURL, "//localhost", "//127.0.0.1", 1)
+		request.Host = strings.Replace(request.Host, "localhost", "127.0.0.1", 1)
 	}
 
-	// Parse the URL
-	parsedURL, err := url.Parse(targetURL)
+	// Use HTTP client with proper transport for SSE support
+	transport := &http.Transport{
+		// Disable connection pooling for SSE
+		DisableKeepAlives: false,
+		// Force HTTP/1.1 for SSE compatibility
+		ForceAttemptHTTP2: false,
+		// Custom dial to force IPv4 for localhost
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		// Don't follow redirects automatically
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		// No timeout for SSE streams
+		Timeout: 0,
+	}
+
+	// Create new request with the target URL
+	proxyReq, err := http.NewRequest(request.Method, targetURL, request.Body)
 	if err != nil {
-		log.Printf("Failed to parse URL: %v", err)
+		log.Printf("Failed to create request: %v", err)
+		response := "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 21\r\n\r\nFailed to create request"
+		_, _ = clientConn.Write([]byte(response))
 		return
 	}
 
-	// Forward the request using direct TCP connection for better streaming support
-	// This handles SSE and other streaming responses properly
-	hostPort := request.Host
-	if !strings.Contains(hostPort, ":") {
-		if parsedURL.Scheme == "https" {
-			hostPort += ":443"
-		} else {
-			hostPort += ":80"
-		}
-	}
+	// Copy headers
+	proxyReq.Header = request.Header.Clone()
 
-	// For localhost, force IPv4
-	if strings.HasPrefix(hostPort, "localhost:") {
-		hostPort = strings.Replace(hostPort, "localhost", "127.0.0.1", 1)
-	}
+	// Remove hop-by-hop headers
+	proxyReq.Header.Del("Proxy-Connection")
+	proxyReq.Header.Del("Connection")
+	proxyReq.Header.Del("Keep-Alive")
+	proxyReq.Header.Del("Proxy-Authenticate")
+	proxyReq.Header.Del("Proxy-Authorization")
+	proxyReq.Header.Del("TE")
+	proxyReq.Header.Del("Trailers")
+	proxyReq.Header.Del("Transfer-Encoding")
+	proxyReq.Header.Del("Upgrade")
 
-	// Connect to target
-	targetConn, err := net.Dial("tcp", hostPort)
+	// Make the request
+	resp, err := client.Do(proxyReq)
 	if err != nil {
-		log.Printf("Failed to connect to %s: %v", hostPort, err)
-		// Send error response
+		log.Printf("Failed to forward request: %v", err)
 		response := fmt.Sprintf("HTTP/1.1 502 Bad Gateway\r\nContent-Length: %d\r\n\r\n%s", len(err.Error()), err.Error())
 		_, _ = clientConn.Write([]byte(response))
 		return
 	}
 	defer func() {
-		_ = targetConn.Close()
+		_ = resp.Body.Close()
 	}()
 
-	// Write the request to target
-	if err := request.Write(targetConn); err != nil {
-		log.Printf("Failed to write request to target: %v", err)
+	// Write status line
+	statusLine := fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, resp.Status)
+	if _, err := clientConn.Write([]byte(statusLine)); err != nil {
+		log.Printf("Failed to write status line: %v", err)
 		return
 	}
 
-	// Bidirectional copy for streaming support
-	go func() {
-		_, _ = io.Copy(targetConn, clientConn)
-	}()
-	_, _ = io.Copy(clientConn, targetConn)
+	// Write headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			header := fmt.Sprintf("%s: %s\r\n", key, value)
+			if _, err := clientConn.Write([]byte(header)); err != nil {
+				log.Printf("Failed to write header: %v", err)
+				return
+			}
+		}
+	}
+
+	// End headers
+	if _, err := clientConn.Write([]byte("\r\n")); err != nil {
+		log.Printf("Failed to write header terminator: %v", err)
+		return
+	}
+
+	// Stream the body - this handles SSE properly
+	// Use a small buffer for better streaming performance
+	buf := make([]byte, 4096)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := clientConn.Write(buf[:n]); writeErr != nil {
+				log.Printf("Failed to write response body: %v", writeErr)
+				break
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Error reading response body: %v", err)
+			}
+			break
+		}
+	}
 }
 
 // getOrCreateCert gets or creates a certificate for a hostname
